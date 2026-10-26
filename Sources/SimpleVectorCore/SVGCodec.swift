@@ -1,4 +1,7 @@
+import CoreGraphics
 import Foundation
+import ImageIO
+import UniformTypeIdentifiers
 
 /// Zero-dependency SVG 1.1 / 2.0 parser and serializer for `SimpleVectorCore`.
 public enum SVGCodec {
@@ -146,19 +149,24 @@ public enum SVGCodec {
         case .signature(let sig):
             var out: [String] = []
             out.append("\(indent)<g data-role=\"signature\" data-signer=\"\(escapeXML(sig.signerName))\"\(opacityAttr)\(rotAttr)>")
-            for stroke in sig.strokes where !stroke.isEmpty {
-                var dParts: [String] = []
-                let first = el.denormalize(stroke[0])
-                dParts.append("M \(formatNum(first.x)) \(formatNum(first.y))")
-                for pt in stroke.dropFirst() {
-                    let dp = el.denormalize(pt)
-                    dParts.append("L \(formatNum(dp.x)) \(formatNum(dp.y))")
+            if let assetData = sig.assetData,
+               let b64 = pngBase64ForAsset(data: assetData, ext: sig.assetExtension, removeWhiteBackground: sig.removeWhiteBackground) {
+                out.append("\(indent)  <image x=\"\(formatNum(f.x))\" y=\"\(formatNum(f.y))\" width=\"\(formatNum(f.width))\" height=\"\(formatNum(f.height))\" href=\"data:image/png;base64,\(b64)\"/>")
+            } else {
+                for stroke in sig.strokes where !stroke.isEmpty {
+                    var dParts: [String] = []
+                    let first = el.denormalize(stroke[0])
+                    dParts.append("M \(formatNum(first.x)) \(formatNum(first.y))")
+                    for pt in stroke.dropFirst() {
+                        let dp = el.denormalize(pt)
+                        dParts.append("L \(formatNum(dp.x)) \(formatNum(dp.y))")
+                    }
+                    out.append("\(indent)  <path d=\"\(dParts.joined(separator: " "))\" fill=\"none\" stroke=\"\(strokeAttr)\" stroke-width=\"\(swAttr)\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>")
                 }
-                out.append("\(indent)  <path d=\"\(dParts.joined(separator: " "))\" fill=\"none\" stroke=\"\(strokeAttr)\" stroke-width=\"\(swAttr)\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>")
-            }
-            let meta = [sig.signerName, sig.caption, sig.dateLabel].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
-            if !meta.isEmpty {
-                out.append("\(indent)  <text x=\"\(formatNum(f.x + 4))\" y=\"\(formatNum(f.maxY - 2))\" font-family=\"Helvetica Neue\" font-size=\"9\" fill=\"\(strokeAttr)\">\(escapeXML(meta))</text>")
+                let meta = [sig.signerName, sig.caption, sig.dateLabel].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
+                if !meta.isEmpty {
+                    out.append("\(indent)  <text x=\"\(formatNum(f.x + 4))\" y=\"\(formatNum(f.maxY - 2))\" font-family=\"Helvetica Neue\" font-size=\"9\" fill=\"\(strokeAttr)\">\(escapeXML(meta))</text>")
+                }
             }
             out.append("\(indent)</g>")
             return out
@@ -199,15 +207,36 @@ public enum SVGCodec {
             let color = el.style.strokeColorHex ?? st.stampKind.defaultColorHex
             var out: [String] = []
             out.append("\(indent)<g data-role=\"stamp\" data-kind=\"\(st.stampKind.rawValue)\"\(opacityAttr)\(rotAttr)>")
-            out.append("\(indent)  <rect x=\"\(formatNum(f.x))\" y=\"\(formatNum(f.y))\" width=\"\(formatNum(f.width))\" height=\"\(formatNum(f.height))\" rx=\"6\" ry=\"6\" fill=\"\(color)\" fill-opacity=\"0.10\" stroke=\"\(color)\" stroke-width=\"2.2\"/>")
-            out.append("\(indent)  <rect x=\"\(formatNum(f.x + 3))\" y=\"\(formatNum(f.y + 3))\" width=\"\(formatNum(max(2, f.width - 6)))\" height=\"\(formatNum(max(2, f.height - 6)))\" rx=\"4\" ry=\"4\" fill=\"none\" stroke=\"\(color)\" stroke-width=\"0.9\"/>")
-            out.append("\(indent)  <text x=\"\(formatNum(f.midX))\" y=\"\(formatNum(f.y + f.height * 0.48))\" font-family=\"Helvetica Neue\" font-size=\"13\" font-weight=\"bold\" text-anchor=\"middle\" fill=\"\(color)\">\(escapeXML(st.title))</text>")
-            if !st.subtitle.isEmpty {
-                out.append("\(indent)  <text x=\"\(formatNum(f.midX))\" y=\"\(formatNum(f.y + f.height * 0.78))\" font-family=\"Helvetica Neue\" font-size=\"8.5\" text-anchor=\"middle\" fill=\"\(color)\">\(escapeXML(st.subtitle))</text>")
+            if let assetData = st.assetData,
+               let b64 = pngBase64ForAsset(data: assetData, ext: st.assetExtension, removeWhiteBackground: st.removeWhiteBackground) {
+                out.append("\(indent)  <image x=\"\(formatNum(f.x))\" y=\"\(formatNum(f.y))\" width=\"\(formatNum(f.width))\" height=\"\(formatNum(f.height))\" href=\"data:image/png;base64,\(b64)\"/>")
+            } else {
+                out.append("\(indent)  <rect x=\"\(formatNum(f.x))\" y=\"\(formatNum(f.y))\" width=\"\(formatNum(f.width))\" height=\"\(formatNum(f.height))\" rx=\"6\" ry=\"6\" fill=\"\(color)\" fill-opacity=\"0.10\" stroke=\"\(color)\" stroke-width=\"2.2\"/>")
+                out.append("\(indent)  <rect x=\"\(formatNum(f.x + 3))\" y=\"\(formatNum(f.y + 3))\" width=\"\(formatNum(max(2, f.width - 6)))\" height=\"\(formatNum(max(2, f.height - 6)))\" rx=\"4\" ry=\"4\" fill=\"none\" stroke=\"\(color)\" stroke-width=\"0.9\"/>")
+                out.append("\(indent)  <text x=\"\(formatNum(f.midX))\" y=\"\(formatNum(f.y + f.height * 0.48))\" font-family=\"Helvetica Neue\" font-size=\"13\" font-weight=\"bold\" text-anchor=\"middle\" fill=\"\(color)\">\(escapeXML(st.title))</text>")
+                if !st.subtitle.isEmpty {
+                    out.append("\(indent)  <text x=\"\(formatNum(f.midX))\" y=\"\(formatNum(f.y + f.height * 0.78))\" font-family=\"Helvetica Neue\" font-size=\"8.5\" text-anchor=\"middle\" fill=\"\(color)\">\(escapeXML(st.subtitle))</text>")
+                }
             }
             out.append("\(indent)</g>")
             return out
         }
+    }
+
+    private static func pngBase64ForAsset(data: Data, ext: String?, removeWhiteBackground: Bool) -> String? {
+        guard let cgImg = AssetImageCodec.renderCGImage(
+            from: data,
+            ext: ext,
+            targetMaxDimension: 800,
+            removeWhiteBackground: removeWhiteBackground
+        ) else { return nil }
+        let outData = NSMutableData()
+        guard let dest = CGImageDestinationCreateWithData(outData as CFMutableData, UTType.png.identifier as CFString, 1, nil) else {
+            return nil
+        }
+        CGImageDestinationAddImage(dest, cgImg, nil)
+        guard CGImageDestinationFinalize(dest) else { return nil }
+        return (outData as Data).base64EncodedString()
     }
 
     private static func arrowHeadSVGPoints(from p0: VectorPoint, to p1: VectorPoint, length: Double) -> String {

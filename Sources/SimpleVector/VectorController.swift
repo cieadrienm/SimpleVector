@@ -3,6 +3,7 @@ import Darwin
 import Foundation
 import Observation
 import SimpleVectorCore
+import UniformTypeIdentifiers
 
 enum ExportFormat: String, CaseIterable, Identifiable, Sendable {
     case pdf = "pdf"
@@ -49,6 +50,8 @@ final class VectorController {
     var selection: Set<UUID> = []
     var signatures: [SignaturePreset]
     var activeSignaturePresetID: UUID
+    var customStamps: [StampPreset] = []
+    var activeCustomStampPresetID: UUID? = nil
     var activeStampKind: VectorStampKind = .approved
     var statusMessage: String = ""
     var lastError: String? = nil
@@ -56,6 +59,18 @@ final class VectorController {
 
     private let persistEnabled: Bool
     private static let signaturesDefaultsKey = "net.cieadrienm.simplevector.signatures"
+
+    static var signaturesDirectoryURL: URL {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support")
+        return appSupport.appendingPathComponent("SimpleVector/Signatures", isDirectory: true)
+    }
+
+    static var stampsDirectoryURL: URL {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support")
+        return appSupport.appendingPathComponent("SimpleVector/Stamps", isDirectory: true)
+    }
 
     private(set) var oscServer: OSCUDPServer?
     private var httpListenFD: Int32 = -1
@@ -83,6 +98,7 @@ final class VectorController {
         }
         self.signatures = loadedSignatures
         self.activeSignaturePresetID = loadedSignatures.first?.id ?? UUID()
+        self.reloadSignaturesAndStampsFromDisk()
         self.statusMessage = L(
             "Prêt · Ouvrir un document PDF ou SVG (⌘O) ou dessiner sur la page A4",
             "Ready · Open a PDF or SVG document (⌘O) or draw on the A4 page"
@@ -295,14 +311,21 @@ final class VectorController {
 
     func stampActiveSignature(at point: VectorPoint? = nil) {
         let pt = point ?? VectorPoint(x: currentPage.width * 0.68, y: currentPage.height * 0.82)
-        let el = VectorOperations.makeSignatureElement(preset: activeSignaturePreset, at: pt, includeDate: true)
-        perform(L("Signature apposée (\(activeSignaturePreset.signerName))", "Signature placed (\(activeSignaturePreset.signerName))")) { doc in
+        let includeDate = (activeSignaturePreset.assetData == nil)
+        let el = VectorOperations.makeSignatureElement(preset: activeSignaturePreset, at: pt, includeDate: includeDate)
+        perform(L("Signature apposée (\(activeSignaturePreset.title))", "Signature placed (\(activeSignaturePreset.title))")) { doc in
             VectorOperations.addElement(el, toPage: currentPageIndex, in: &doc)
         }
         selection = [el.id]
     }
 
     func stampApprovalBadge(kind: VectorStampKind? = nil, at point: VectorPoint? = nil) {
+        if kind == nil,
+           let customID = activeCustomStampPresetID,
+           let customPreset = customStamps.first(where: { $0.id == customID }) {
+            stampCustomStamp(customPreset, at: point)
+            return
+        }
         let k = kind ?? activeStampKind
         let pt = point ?? VectorPoint(x: currentPage.width * 0.30, y: currentPage.height * 0.82)
         let el = VectorOperations.makeStampElement(kind: k, at: pt)
@@ -310,6 +333,161 @@ final class VectorController {
             VectorOperations.addElement(el, toPage: currentPageIndex, in: &doc)
         }
         selection = [el.id]
+    }
+
+    func stampCustomStamp(_ preset: StampPreset, at point: VectorPoint? = nil) {
+        let pt = point ?? VectorPoint(x: currentPage.width * 0.30, y: currentPage.height * 0.82)
+        let el = VectorOperations.makeCustomStampElement(preset: preset, at: pt)
+        perform(L("Tampon « \(preset.title) » ajouté", "Stamp \"\(preset.title)\" added")) { doc in
+            VectorOperations.addElement(el, toPage: currentPageIndex, in: &doc)
+        }
+        selection = [el.id]
+    }
+
+    // MARK: - Signatures & Stamps Folders (`~/Library/Application Support/SimpleVector/{Signatures,Stamps}`)
+
+    func reloadSignaturesAndStampsFromDisk() {
+        let fm = FileManager.default
+        let sigDir = Self.signaturesDirectoryURL
+        let stDir = Self.stampsDirectoryURL
+        try? fm.createDirectory(at: sigDir, withIntermediateDirectories: true)
+        try? fm.createDirectory(at: stDir, withIntermediateDirectories: true)
+
+        // Keep non-disk signatures (defaults + user-saved calligraphic signatures)
+        let baseSigs = signatures.filter { $0.fileURL == nil }
+        var diskSigs: [SignaturePreset] = []
+        if let urls = try? fm.contentsOfDirectory(at: sigDir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) {
+            for url in urls.sorted(by: { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }) {
+                let ext = url.pathExtension.lowercased()
+                guard AssetImageCodec.supportedExtensions.contains(ext),
+                      let data = try? Data(contentsOf: url), !data.isEmpty else { continue }
+                let title = url.deletingPathExtension().lastPathComponent
+                let deterministicID = Self.deterministicUUID(for: "sig:" + url.lastPathComponent)
+                diskSigs.append(
+                    SignaturePreset(
+                        id: deterministicID,
+                        title: title,
+                        signerName: title,
+                        caption: ext.uppercased(),
+                        colorHex: "#1E3A8A",
+                        strokes: [],
+                        assetData: data,
+                        assetExtension: ext,
+                        removeWhiteBackground: true,
+                        fileURL: url
+                    )
+                )
+            }
+        }
+        signatures = diskSigs + baseSigs
+        if !signatures.contains(where: { $0.id == activeSignaturePresetID }), let first = signatures.first {
+            activeSignaturePresetID = first.id
+        }
+
+        var loadedStamps: [StampPreset] = []
+        if let urls = try? fm.contentsOfDirectory(at: stDir, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) {
+            for url in urls.sorted(by: { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }) {
+                let ext = url.pathExtension.lowercased()
+                guard AssetImageCodec.supportedExtensions.contains(ext),
+                      let data = try? Data(contentsOf: url), !data.isEmpty else { continue }
+                let title = url.deletingPathExtension().lastPathComponent
+                let deterministicID = Self.deterministicUUID(for: "stamp:" + url.lastPathComponent)
+                loadedStamps.append(
+                    StampPreset(
+                        id: deterministicID,
+                        title: title,
+                        assetData: data,
+                        assetExtension: ext,
+                        removeWhiteBackground: true,
+                        fileURL: url
+                    )
+                )
+            }
+        }
+        customStamps = loadedStamps
+        if let activeID = activeCustomStampPresetID, !customStamps.contains(where: { $0.id == activeID }) {
+            activeCustomStampPresetID = customStamps.first?.id
+        }
+    }
+
+    func openSignaturesFolderInFinder() {
+        let dir = Self.signaturesDirectoryURL
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        NSWorkspace.shared.open(dir)
+    }
+
+    func openStampsFolderInFinder() {
+        let dir = Self.stampsDirectoryURL
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        NSWorkspace.shared.open(dir)
+    }
+
+    func importSignatureFileInteractive() {
+        let panel = NSOpenPanel()
+        panel.title = L("Importer une signature (PDF, PNG, JPG, SVG…)", "Import a Signature (PDF, PNG, JPG, SVG…)")
+        panel.allowedContentTypes = [.pdf, .image, .svg]
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        guard panel.runModal() == .OK else { return }
+        let dir = Self.signaturesDirectoryURL
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        var lastImportedName: String? = nil
+        for url in panel.urls {
+            let dest = dir.appendingPathComponent(url.lastPathComponent)
+            try? FileManager.default.removeItem(at: dest)
+            try? FileManager.default.copyItem(at: url, to: dest)
+            lastImportedName = url.lastPathComponent
+        }
+        reloadSignaturesAndStampsFromDisk()
+        if let name = lastImportedName {
+            let id = Self.deterministicUUID(for: "sig:" + name)
+            if signatures.contains(where: { $0.id == id }) {
+                activeSignaturePresetID = id
+            }
+            statusMessage = L("Signature importée : \(name)", "Signature imported: \(name)")
+        }
+    }
+
+    func importStampFileInteractive() {
+        let panel = NSOpenPanel()
+        panel.title = L("Importer un tampon (PDF, PNG, JPG, SVG…)", "Import a Stamp (PDF, PNG, JPG, SVG…)")
+        panel.allowedContentTypes = [.pdf, .image, .svg]
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        guard panel.runModal() == .OK else { return }
+        let dir = Self.stampsDirectoryURL
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        var lastImportedName: String? = nil
+        for url in panel.urls {
+            let dest = dir.appendingPathComponent(url.lastPathComponent)
+            try? FileManager.default.removeItem(at: dest)
+            try? FileManager.default.copyItem(at: url, to: dest)
+            lastImportedName = url.lastPathComponent
+        }
+        reloadSignaturesAndStampsFromDisk()
+        if let name = lastImportedName {
+            let id = Self.deterministicUUID(for: "stamp:" + name)
+            if let preset = customStamps.first(where: { $0.id == id }) {
+                activeCustomStampPresetID = preset.id
+                stampCustomStamp(preset)
+            }
+        }
+    }
+
+    private static func deterministicUUID(for key: String) -> UUID {
+        var bytes = [UInt8](repeating: 0, count: 16)
+        let utf8 = Array(key.utf8)
+        for (i, b) in utf8.enumerated() {
+            bytes[i % 16] = bytes[i % 16] &+ b &* UInt8((i % 7) + 1)
+        }
+        bytes[6] = (bytes[6] & 0x0F) | 0x40
+        bytes[8] = (bytes[8] & 0x3F) | 0x80
+        return UUID(uuid: (
+            bytes[0], bytes[1], bytes[2], bytes[3],
+            bytes[4], bytes[5], bytes[6], bytes[7],
+            bytes[8], bytes[9], bytes[10], bytes[11],
+            bytes[12], bytes[13], bytes[14], bytes[15]
+        ))
     }
 
     func addTextBlock(text: String = L("Texte éditable", "Editable text"), at point: VectorPoint? = nil) {
@@ -357,7 +535,8 @@ final class VectorController {
         )
         signatures.append(preset)
         activeSignaturePresetID = preset.id
-        if persistEnabled, let data = try? JSONEncoder().encode(signatures) {
+        let nonDisk = signatures.filter { $0.fileURL == nil }
+        if persistEnabled, let data = try? JSONEncoder().encode(nonDisk) {
             UserDefaults.standard.set(data, forKey: Self.signaturesDefaultsKey)
         }
         statusMessage = L("Signature enregistrée dans la bibliothèque", "Signature saved to library")

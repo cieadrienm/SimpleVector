@@ -109,6 +109,29 @@ final class VectorSceneRenderCache {
     private var cachedRevision: Int = -1
     private var cachedGeometries: [UUID: CachedElementGeometry] = [:]
     private var pdfBackdropCache: [UUID: NSImage] = [:]
+    private var assetImageCache: [String: NSImage] = [:]
+
+    func assetImage(for data: Data, ext: String?, removeWhiteBackground: Bool) -> NSImage? {
+        var hasher = Hasher()
+        hasher.combine(data.count)
+        hasher.combine(data.prefix(64))
+        hasher.combine(data.suffix(64))
+        hasher.combine(ext ?? "")
+        hasher.combine(removeWhiteBackground)
+        let key = "\(hasher.finalize())_\(data.count)_\(removeWhiteBackground ? 1 : 0)"
+        if let existing = assetImageCache[key] {
+            return existing
+        }
+        guard let cgImg = AssetImageCodec.renderCGImage(
+            from: data,
+            ext: ext,
+            targetMaxDimension: 720,
+            removeWhiteBackground: removeWhiteBackground
+        ) else { return nil }
+        let nsImg = NSImage(cgImage: cgImg, size: NSSize(width: cgImg.width, height: cgImg.height))
+        assetImageCache[key] = nsImg
+        return nsImg
+    }
 
     func backdropImage(for page: VectorPage) -> NSImage? {
         guard let pdfData = page.pdfPageData else { return nil }
@@ -252,6 +275,7 @@ struct CanvasViewportView: View {
     @State private var movingElementInitialFrames: [UUID: VectorRect] = [:]
     @State private var resizingHandleIndex: Int? = nil
     @State private var resizingInitialFrame: VectorRect? = nil
+    @State private var isRotatingElement: Bool = false
     @State private var panDragInitialOffset: CGSize? = nil
     @State private var magnifyStartZoom: CGFloat? = nil
 
@@ -431,161 +455,219 @@ struct CanvasViewportView: View {
         // Page border
         ctx.stroke(Path(sheet), with: .color(Color.white.opacity(0.22)), lineWidth: 1.0)
 
-        // Selection bounding boxes & resize handles outside clip
+        // Selection bounding boxes, resize handles & rotation handle outside clip
         for el in page.elements where model.controller.selection.contains(el.id) && el.visible {
             let selRect = geom.pageRectToPane(el.frame)
-            ctx.stroke(
-                Path(selRect),
-                with: .color(Theme.accent.swiftUI),
-                style: StrokeStyle(lineWidth: 1.5)
-            )
-            for handlePt in cornerHandles(for: selRect) {
-                let hRect = CGRect(x: handlePt.x - 4, y: handlePt.y - 4, width: 8, height: 8)
-                ctx.fill(Path(roundedRect: hRect, cornerRadius: 2), with: .color(Theme.background.swiftUI))
-                ctx.stroke(Path(roundedRect: hRect, cornerRadius: 2), with: .color(Theme.accent.swiftUI), lineWidth: 1.5)
+            ctx.drawLayer { selLayer in
+                if abs(el.rotationDegrees) > 0.01 {
+                    selLayer.translateBy(x: selRect.midX, y: selRect.midY)
+                    selLayer.rotate(by: .degrees(el.rotationDegrees))
+                    selLayer.translateBy(x: -selRect.midX, y: -selRect.midY)
+                }
+                selLayer.stroke(
+                    Path(selRect),
+                    with: .color(Theme.accent.swiftUI),
+                    style: StrokeStyle(lineWidth: 1.5)
+                )
+                for handlePt in cornerHandles(for: selRect) {
+                    let hRect = CGRect(x: handlePt.x - 4, y: handlePt.y - 4, width: 8, height: 8)
+                    selLayer.fill(Path(roundedRect: hRect, cornerRadius: 2), with: .color(Theme.background.swiftUI))
+                    selLayer.stroke(Path(roundedRect: hRect, cornerRadius: 2), with: .color(Theme.accent.swiftUI), lineWidth: 1.5)
+                }
+
+                // Top-center rotation handle stem + circle
+                if !el.locked {
+                    let topMid = CGPoint(x: selRect.midX, y: selRect.minY)
+                    let rotKnob = CGPoint(x: selRect.midX, y: selRect.minY - 22)
+                    var stem = Path()
+                    stem.move(to: topMid)
+                    stem.addLine(to: rotKnob)
+                    selLayer.stroke(stem, with: .color(Theme.accent.swiftUI), lineWidth: 1.4)
+                    let knobRect = CGRect(x: rotKnob.x - 5.5, y: rotKnob.y - 5.5, width: 11, height: 11)
+                    selLayer.fill(Path(ellipseIn: knobRect), with: .color(Theme.accent.swiftUI))
+                    selLayer.stroke(Path(ellipseIn: knobRect), with: .color(Theme.background.swiftUI), lineWidth: 1.5)
+                }
+            }
+
+            if isRotatingElement || abs(el.rotationDegrees) > 0.2 {
+                let rotPt = rotationHandlePoint(for: selRect, rotationDegrees: el.rotationDegrees)
+                let degStr = String(format: "%+.0f°", el.rotationDegrees)
+                let badge = Text(degStr)
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                    .foregroundStyle(Theme.accent.swiftUI)
+                ctx.draw(badge, at: CGPoint(x: rotPt.x, y: rotPt.y - 14), anchor: .center)
             }
         }
     }
 
     fileprivate static func drawElementInLayer(
         _ el: VectorElement,
-        in layer: inout GraphicsContext,
+        in parentLayer: inout GraphicsContext,
         geom: PageCanvasGeometry,
         tx: CGAffineTransform,
         cached: VectorSceneRenderCache.CachedElementGeometry?
     ) {
         let paneRect = geom.pageRectToPane(el.frame)
-        let fillRGB = RGBAColor(hex: el.style.fillColorHex)
-        let strokeRGB = RGBAColor(hex: el.style.strokeColorHex)
-        let lineW = max(0.8, CGFloat(el.style.strokeWidth) * geom.scale)
-        let dash: [CGFloat] = el.style.dashed ? [6 * geom.zoomScale, 4 * geom.zoomScale] : []
+        parentLayer.drawLayer { layer in
+            if abs(el.rotationDegrees) > 0.01 {
+                layer.translateBy(x: paneRect.midX, y: paneRect.midY)
+                layer.rotate(by: .degrees(el.rotationDegrees))
+                layer.translateBy(x: -paneRect.midX, y: -paneRect.midY)
+            }
+            let fillRGB = RGBAColor(hex: el.style.fillColorHex)
+            let strokeRGB = RGBAColor(hex: el.style.strokeColorHex)
+            let lineW = max(0.8, CGFloat(el.style.strokeWidth) * geom.scale)
+            let dash: [CGFloat] = el.style.dashed ? [6 * geom.zoomScale, 4 * geom.zoomScale] : []
 
-        if let path = cached?.path {
-            let transformed = path.applying(tx)
-            if let fillRGB {
-                layer.fill(
-                    transformed,
-                    with: .color(Color(red: fillRGB.r, green: fillRGB.g, blue: fillRGB.b, opacity: el.style.opacity))
-                )
-            }
-            if let strokeRGB, el.style.strokeWidth > 0 {
-                layer.stroke(
-                    transformed,
-                    with: .color(Color(red: strokeRGB.r, green: strokeRGB.g, blue: strokeRGB.b, opacity: el.style.opacity)),
-                    style: StrokeStyle(lineWidth: lineW, lineCap: .round, lineJoin: .round, dash: dash)
-                )
-            }
-            if let heads = cached?.arrowHeadPath?.applying(tx), let sc = strokeRGB ?? fillRGB {
-                layer.fill(
-                    heads,
-                    with: .color(Color(red: sc.r, green: sc.g, blue: sc.b, opacity: el.style.opacity))
-                )
-            }
-        }
-
-        switch el.kind {
-        case .signature(let sig):
-            let meta = [sig.signerName, sig.caption, sig.dateLabel].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
-            if !meta.isEmpty {
-                let ink = strokeRGB ?? RGBAColor(hex: "#1E3A8A")!
-                let text = Text(meta)
-                    .font(.system(size: max(6, 8.5 * geom.scale), weight: .medium))
-                    .foregroundStyle(Color(red: ink.r, green: ink.g, blue: ink.b, opacity: el.style.opacity))
-                layer.draw(
-                    text,
-                    at: CGPoint(x: paneRect.minX + 2, y: paneRect.maxY - 2 * geom.scale),
-                    anchor: .bottomLeading
-                )
-            }
-
-        case .text(let t):
-            let tc = fillRGB ?? strokeRGB ?? RGBAColor(r: 0.07, g: 0.07, b: 0.09)
-            let fontSize = max(4.5, CGFloat(t.fontSize) * geom.scale)
-            let ctFont = PDFCodec.resolveCTFont(for: t, size: fontSize)
-            let unscaledFont = PDFCodec.resolveCTFont(for: t, size: CGFloat(t.fontSize))
-            let firstBaselineOffset = t.baselineOffset ?? Double(CTFontGetCapHeight(unscaledFont))
-            let ascent = CTFontGetAscent(ctFont)
-            let lineH = CGFloat(t.fontSize * 1.25) * geom.scale
-            let lines = t.text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-            for (idx, lineStr) in lines.enumerated() where !lineStr.isEmpty {
-                let (adaptedStr, accents) = PDFCodec.adaptStringForSubsetFont(lineStr, ctFont: unscaledFont, kern: t.letterSpacing)
-                let textColor = Color(red: tc.r, green: tc.g, blue: tc.b, opacity: el.style.opacity)
-                let txt = Text(adaptedStr)
-                    .font(Font(ctFont))
-                    .tracking(CGFloat(t.letterSpacing) * geom.scale)
-                    .foregroundStyle(textColor)
-                let paneBaselineY = paneRect.minY + CGFloat(firstBaselineOffset) * geom.scale + CGFloat(idx) * lineH
-                let drawTopY = paneBaselineY - ascent
-                let anchorPt: CGPoint
-                let unitAnchor: UnitPoint
-                switch t.alignment {
-                case .left:
-                    anchorPt = CGPoint(x: paneRect.minX, y: drawTopY)
-                    unitAnchor = .topLeading
-                case .center:
-                    anchorPt = CGPoint(x: paneRect.midX, y: drawTopY)
-                    unitAnchor = .top
-                case .right:
-                    anchorPt = CGPoint(x: paneRect.maxX, y: drawTopY)
-                    unitAnchor = .topTrailing
+            if let path = cached?.path {
+                let transformed = path.applying(tx)
+                if let fillRGB {
+                    layer.fill(
+                        transformed,
+                        with: .color(Color(red: fillRGB.r, green: fillRGB.g, blue: fillRGB.b, opacity: el.style.opacity))
+                    )
                 }
-                layer.draw(txt, at: anchorPt, anchor: unitAnchor)
+                if let strokeRGB, el.style.strokeWidth > 0 {
+                    layer.stroke(
+                        transformed,
+                        with: .color(Color(red: strokeRGB.r, green: strokeRGB.g, blue: strokeRGB.b, opacity: el.style.opacity)),
+                        style: StrokeStyle(lineWidth: lineW, lineCap: .round, lineJoin: .round, dash: dash)
+                    )
+                }
+                if let heads = cached?.arrowHeadPath?.applying(tx), let sc = strokeRGB ?? fillRGB {
+                    layer.fill(
+                        heads,
+                        with: .color(Color(red: sc.r, green: sc.g, blue: sc.b, opacity: el.style.opacity))
+                    )
+                }
+            }
 
-                if !accents.isEmpty {
-                    var accentPath = Path()
-                    for acc in accents {
-                        let cx = paneRect.minX + CGFloat(acc.centerX) * geom.scale
-                        let topY = paneBaselineY + CGFloat(acc.capTopY) * geom.scale
-                        let ch = CGFloat(acc.capHeight) * geom.scale
-                        switch acc.kind {
-                        case .acute:
-                            accentPath.move(to: CGPoint(x: cx - ch * 0.05, y: topY - ch * 0.08))
-                            accentPath.addLine(to: CGPoint(x: cx + ch * 0.12, y: topY - ch * 0.23))
-                        case .grave:
-                            accentPath.move(to: CGPoint(x: cx + ch * 0.05, y: topY - ch * 0.08))
-                            accentPath.addLine(to: CGPoint(x: cx - ch * 0.12, y: topY - ch * 0.23))
-                        case .circumflex:
-                            accentPath.move(to: CGPoint(x: cx - ch * 0.13, y: topY - ch * 0.08))
-                            accentPath.addLine(to: CGPoint(x: cx, y: topY - ch * 0.22))
-                            accentPath.addLine(to: CGPoint(x: cx + ch * 0.13, y: topY - ch * 0.08))
-                        case .diaeresis:
-                            let r = max(0.8, ch * 0.08)
-                            accentPath.addEllipse(in: CGRect(x: cx - ch * 0.11 - r, y: topY - ch * 0.16 - r, width: r * 2, height: r * 2))
-                            accentPath.addEllipse(in: CGRect(x: cx + ch * 0.11 - r, y: topY - ch * 0.16 - r, width: r * 2, height: r * 2))
-                        case .cedilla:
-                            accentPath.move(to: CGPoint(x: cx, y: paneBaselineY))
-                            accentPath.addLine(to: CGPoint(x: cx - ch * 0.03, y: paneBaselineY + ch * 0.12))
-                            accentPath.addLine(to: CGPoint(x: cx + ch * 0.06, y: paneBaselineY + ch * 0.20))
-                        }
+            switch el.kind {
+            case .signature(let sig):
+                if let assetData = sig.assetData, !assetData.isEmpty,
+                   let nsImg = VectorSceneRenderCache.shared.assetImage(
+                       for: assetData,
+                       ext: sig.assetExtension,
+                       removeWhiteBackground: sig.removeWhiteBackground
+                   ) {
+                    layer.opacity = el.style.opacity
+                    let resolved = layer.resolve(Image(nsImage: nsImg))
+                    layer.draw(resolved, in: paneRect)
+                } else {
+                    let meta = [sig.signerName, sig.caption, sig.dateLabel].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
+                    if !meta.isEmpty {
+                        let ink = strokeRGB ?? RGBAColor(hex: "#1E3A8A")!
+                        let text = Text(meta)
+                            .font(.system(size: max(6, 8.5 * geom.scale), weight: .medium))
+                            .foregroundStyle(Color(red: ink.r, green: ink.g, blue: ink.b, opacity: el.style.opacity))
+                        layer.draw(
+                            text,
+                            at: CGPoint(x: paneRect.minX + 2, y: paneRect.maxY - 2 * geom.scale),
+                            anchor: .bottomLeading
+                        )
                     }
-                    let strokeW = max(1.0, CGFloat(t.fontSize * 0.09) * geom.scale)
-                    layer.stroke(accentPath, with: .color(textColor), style: StrokeStyle(lineWidth: strokeW, lineCap: .round, lineJoin: .round))
                 }
-            }
 
-        case .stamp(let st):
-            let c = strokeRGB ?? RGBAColor(hex: st.stampKind.defaultColorHex) ?? RGBAColor(r: 0.1, g: 0.6, b: 0.3)
-            let color = Color(red: c.r, green: c.g, blue: c.b, opacity: el.style.opacity)
-            let outer = Path(roundedRect: paneRect, cornerRadius: 5 * geom.scale)
-            layer.fill(outer, with: .color(color.opacity(0.10)))
-            layer.stroke(outer, with: .color(color), lineWidth: max(1.2, 2.0 * geom.scale))
-            let inner = paneRect.insetBy(dx: 3 * geom.scale, dy: 3 * geom.scale)
-            if inner.width > 4 && inner.height > 4 {
-                layer.stroke(Path(roundedRect: inner, cornerRadius: 3.5 * geom.scale), with: .color(color), lineWidth: max(0.7, 0.9 * geom.scale))
-            }
-            let titleText = Text(st.title)
-                .font(.system(size: max(6, min(13.5, el.frame.height * 0.28) * geom.scale), weight: .bold))
-                .foregroundStyle(color)
-            layer.draw(titleText, at: CGPoint(x: paneRect.midX, y: paneRect.minY + paneRect.height * 0.38), anchor: .center)
-            if !st.subtitle.isEmpty {
-                let subText = Text(st.subtitle)
-                    .font(.system(size: max(5, min(8.5, el.frame.height * 0.17) * geom.scale), weight: .medium))
-                    .foregroundStyle(color)
-                layer.draw(subText, at: CGPoint(x: paneRect.midX, y: paneRect.minY + paneRect.height * 0.72), anchor: .center)
-            }
+            case .text(let t):
+                let tc = fillRGB ?? strokeRGB ?? RGBAColor(r: 0.07, g: 0.07, b: 0.09)
+                let fontSize = max(4.5, CGFloat(t.fontSize) * geom.scale)
+                let ctFont = PDFCodec.resolveCTFont(for: t, size: fontSize)
+                let unscaledFont = PDFCodec.resolveCTFont(for: t, size: CGFloat(t.fontSize))
+                let firstBaselineOffset = t.baselineOffset ?? Double(CTFontGetCapHeight(unscaledFont))
+                let ascent = CTFontGetAscent(ctFont)
+                let lineH = CGFloat(t.fontSize * 1.25) * geom.scale
+                let lines = t.text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+                for (idx, lineStr) in lines.enumerated() where !lineStr.isEmpty {
+                    let (adaptedStr, accents) = PDFCodec.adaptStringForSubsetFont(lineStr, ctFont: unscaledFont, kern: t.letterSpacing)
+                    let textColor = Color(red: tc.r, green: tc.g, blue: tc.b, opacity: el.style.opacity)
+                    let txt = Text(adaptedStr)
+                        .font(Font(ctFont))
+                        .tracking(CGFloat(t.letterSpacing) * geom.scale)
+                        .foregroundStyle(textColor)
+                    let paneBaselineY = paneRect.minY + CGFloat(firstBaselineOffset) * geom.scale + CGFloat(idx) * lineH
+                    let drawTopY = paneBaselineY - ascent
+                    let anchorPt: CGPoint
+                    let unitAnchor: UnitPoint
+                    switch t.alignment {
+                    case .left:
+                        anchorPt = CGPoint(x: paneRect.minX, y: drawTopY)
+                        unitAnchor = .topLeading
+                    case .center:
+                        anchorPt = CGPoint(x: paneRect.midX, y: drawTopY)
+                        unitAnchor = .top
+                    case .right:
+                        anchorPt = CGPoint(x: paneRect.maxX, y: drawTopY)
+                        unitAnchor = .topTrailing
+                    }
+                    layer.draw(txt, at: anchorPt, anchor: unitAnchor)
 
-        default:
-            break
+                    if !accents.isEmpty {
+                        var accentPath = Path()
+                        for acc in accents {
+                            let cx = paneRect.minX + CGFloat(acc.centerX) * geom.scale
+                            let topY = paneBaselineY + CGFloat(acc.capTopY) * geom.scale
+                            let ch = CGFloat(acc.capHeight) * geom.scale
+                            switch acc.kind {
+                            case .acute:
+                                accentPath.move(to: CGPoint(x: cx - ch * 0.05, y: topY - ch * 0.08))
+                                accentPath.addLine(to: CGPoint(x: cx + ch * 0.12, y: topY - ch * 0.23))
+                            case .grave:
+                                accentPath.move(to: CGPoint(x: cx + ch * 0.05, y: topY - ch * 0.08))
+                                accentPath.addLine(to: CGPoint(x: cx - ch * 0.12, y: topY - ch * 0.23))
+                            case .circumflex:
+                                accentPath.move(to: CGPoint(x: cx - ch * 0.13, y: topY - ch * 0.08))
+                                accentPath.addLine(to: CGPoint(x: cx, y: topY - ch * 0.22))
+                                accentPath.addLine(to: CGPoint(x: cx + ch * 0.13, y: topY - ch * 0.08))
+                            case .diaeresis:
+                                let r = max(0.8, ch * 0.08)
+                                accentPath.addEllipse(in: CGRect(x: cx - ch * 0.11 - r, y: topY - ch * 0.16 - r, width: r * 2, height: r * 2))
+                                accentPath.addEllipse(in: CGRect(x: cx + ch * 0.11 - r, y: topY - ch * 0.16 - r, width: r * 2, height: r * 2))
+                            case .cedilla:
+                                accentPath.move(to: CGPoint(x: cx, y: paneBaselineY))
+                                accentPath.addLine(to: CGPoint(x: cx - ch * 0.03, y: paneBaselineY + ch * 0.12))
+                                accentPath.addLine(to: CGPoint(x: cx + ch * 0.06, y: paneBaselineY + ch * 0.20))
+                            }
+                        }
+                        let strokeW = max(1.0, CGFloat(t.fontSize * 0.09) * geom.scale)
+                        layer.stroke(accentPath, with: .color(textColor), style: StrokeStyle(lineWidth: strokeW, lineCap: .round, lineJoin: .round))
+                    }
+                }
+
+            case .stamp(let st):
+                if let assetData = st.assetData, !assetData.isEmpty,
+                   let nsImg = VectorSceneRenderCache.shared.assetImage(
+                       for: assetData,
+                       ext: st.assetExtension,
+                       removeWhiteBackground: st.removeWhiteBackground
+                   ) {
+                    layer.opacity = el.style.opacity
+                    let resolved = layer.resolve(Image(nsImage: nsImg))
+                    layer.draw(resolved, in: paneRect)
+                } else {
+                    let c = strokeRGB ?? RGBAColor(hex: st.stampKind.defaultColorHex) ?? RGBAColor(r: 0.1, g: 0.6, b: 0.3)
+                    let color = Color(red: c.r, green: c.g, blue: c.b, opacity: el.style.opacity)
+                    let outer = Path(roundedRect: paneRect, cornerRadius: 5 * geom.scale)
+                    layer.fill(outer, with: .color(color.opacity(0.10)))
+                    layer.stroke(outer, with: .color(color), lineWidth: max(1.2, 2.0 * geom.scale))
+                    let inner = paneRect.insetBy(dx: 3 * geom.scale, dy: 3 * geom.scale)
+                    if inner.width > 4 && inner.height > 4 {
+                        layer.stroke(Path(roundedRect: inner, cornerRadius: 3.5 * geom.scale), with: .color(color), lineWidth: max(0.7, 0.9 * geom.scale))
+                    }
+                    let titleText = Text(st.title)
+                        .font(.system(size: max(6, min(13.5, el.frame.height * 0.28) * geom.scale), weight: .bold))
+                        .foregroundStyle(color)
+                    layer.draw(titleText, at: CGPoint(x: paneRect.midX, y: paneRect.minY + paneRect.height * 0.38), anchor: .center)
+                    if !st.subtitle.isEmpty {
+                        let subText = Text(st.subtitle)
+                            .font(.system(size: max(5, min(8.5, el.frame.height * 0.17) * geom.scale), weight: .medium))
+                            .foregroundStyle(color)
+                        layer.draw(subText, at: CGPoint(x: paneRect.midX, y: paneRect.minY + paneRect.height * 0.72), anchor: .center)
+                    }
+                }
+
+            default:
+                break
+            }
         }
     }
 
@@ -596,6 +678,28 @@ struct CanvasViewportView: View {
             CGPoint(x: rect.maxX, y: rect.maxY),
             CGPoint(x: rect.minX, y: rect.maxY),
         ]
+    }
+
+    private func rotatePoint(_ pt: CGPoint, around center: CGPoint, degrees: Double) -> CGPoint {
+        guard abs(degrees) > 0.01 else { return pt }
+        let rad = CGFloat(degrees * .pi / 180.0)
+        let dx = pt.x - center.x
+        let dy = pt.y - center.y
+        return CGPoint(
+            x: center.x + dx * cos(rad) - dy * sin(rad),
+            y: center.y + dx * sin(rad) + dy * cos(rad)
+        )
+    }
+
+    private func rotatedCornerHandles(for rect: CGRect, rotationDegrees: Double) -> [CGPoint] {
+        let center = CGPoint(x: rect.midX, y: rect.midY)
+        return cornerHandles(for: rect).map { rotatePoint($0, around: center, degrees: rotationDegrees) }
+    }
+
+    private func rotationHandlePoint(for rect: CGRect, rotationDegrees: Double) -> CGPoint {
+        let center = CGPoint(x: rect.midX, y: rect.midY)
+        let unrotated = CGPoint(x: rect.midX, y: rect.minY - 22)
+        return rotatePoint(unrotated, around: center, degrees: rotationDegrees)
     }
 
     // MARK: - Interactive Gesture Handling (Select, Resize, Edit PDF Text, Sign, Draw)
@@ -630,11 +734,17 @@ struct CanvasViewportView: View {
                     break
 
                 case .select:
-                    // Check if starting on a resize handle of the selected element
-                    if movingElementInitialFrames.isEmpty && resizingHandleIndex == nil && panDragInitialOffset == nil {
-                        if let sel = ctrl.primarySelectedElement {
+                    // Check if starting on the rotation handle or a resize handle of the selected element
+                    if movingElementInitialFrames.isEmpty && resizingHandleIndex == nil && !isRotatingElement && panDragInitialOffset == nil {
+                        if let sel = ctrl.primarySelectedElement, !sel.locked {
                             let paneRect = geom.pageRectToPane(sel.frame)
-                            let handles = cornerHandles(for: paneRect)
+                            let rotPt = rotationHandlePoint(for: paneRect, rotationDegrees: sel.rotationDegrees)
+                            if hypot(rotPt.x - startPane.x, rotPt.y - startPane.y) <= 11.0 {
+                                isRotatingElement = true
+                                ctrl.history.record(ctrl.document)
+                                return
+                            }
+                            let handles = rotatedCornerHandles(for: paneRect, rotationDegrees: sel.rotationDegrees)
                             if let hIdx = handles.firstIndex(where: { hypot($0.x - startPane.x, $0.y - startPane.y) <= 9.0 }) {
                                 resizingHandleIndex = hIdx
                                 resizingInitialFrame = sel.frame
@@ -668,7 +778,27 @@ struct CanvasViewportView: View {
                         }
                     }
 
-                    // Apply resize, element move, or viewport pan if dragging
+                    // Apply rotation, resize, element move, or viewport pan if dragging
+                    if isRotatingElement, let sel = ctrl.primarySelectedElement {
+                        let paneRect = geom.pageRectToPane(sel.frame)
+                        let center = CGPoint(x: paneRect.midX, y: paneRect.midY)
+                        var deg = atan2(Double(currentPane.y - center.y), Double(currentPane.x - center.x)) * 180.0 / .pi + 90.0
+                        while deg > 180.0 { deg -= 360.0 }
+                        while deg < -180.0 { deg += 360.0 }
+                        if NSEvent.modifierFlags.contains(.shift) {
+                            deg = (deg / 15.0).rounded() * 15.0
+                        } else {
+                            for cardinal in [-180.0, -90.0, 0.0, 90.0, 180.0] where abs(deg - cardinal) < 2.2 {
+                                deg = cardinal
+                                break
+                            }
+                        }
+                        VectorOperations.updateElement(id: sel.id, onPage: ctrl.currentPageIndex, in: &ctrl.document) { el in
+                            el.rotationDegrees = deg
+                        }
+                        return
+                    }
+
                     let dx = currentPagePt.x - startPage.x
                     let dy = currentPagePt.y - startPage.y
                     if let hIdx = resizingHandleIndex, let initFrame = resizingInitialFrame, let selID = ctrl.primarySelectedElement?.id {
@@ -780,6 +910,7 @@ struct CanvasViewportView: View {
                     movingElementInitialFrames.removeAll()
                     resizingHandleIndex = nil
                     resizingInitialFrame = nil
+                    isRotatingElement = false
                     panDragInitialOffset = nil
                 }
             }

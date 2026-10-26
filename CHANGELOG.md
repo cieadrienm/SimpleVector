@@ -3,6 +3,16 @@
 La version de SimpleVector vit à un seul endroit : `VERSION` dans `Scripts/bundle.sh` (G110).
 Correctif : `x.y.Z` ; fonction : `x.Y.0` ; rupture : `X.0.0`.
 
+## 0.2.0 — 2026-10-26
+
+- **Dossiers dédiés `Signatures` et `Tampons` (PDF, PNG, JPG, TIFF, HEIC, WebP, SVG), détourage automatique du fond papier blanc et rotation libre (`-180° … +180°`)** (`VectorDocument`, `AssetImageCodec`, `VectorController`, `CanvasViewportView`, `InspectorView`, `PDFCodec`, `SVGCodec`) :
+  - **Dossiers `~/Library/Application Support/SimpleVector/Signatures/` et `~/Library/Application Support/SimpleVector/Stamps/`** : créés et scannés automatiquement au lancement (ainsi qu'en un clic via le bouton d'actualisation `↻`). Tout fichier `.pdf`, `.png`, `.jpg`, `.jpeg`, `.tiff`, `.tif`, `.heic`, `.webp` ou `.svg` déposé dans ces dossiers apparaît immédiatement dans l'inspecteur avec sa miniature.
+  - **Import direct (`+ Fichier…`) et raccourci Finder (`folder`)** : dans les sections **Signatures** et **Tampons & Visas** de l'inspecteur (ainsi que dans le menu `Édition Vectorielle & PDF`), un bouton `+ Fichier…` ouvre un sélecteur macOS (`NSOpenPanel`) qui copie les fichiers choisis dans le dossier correspondant, et une icône dossier ouvre directement `Signatures/` ou `Stamps/` dans le Finder.
+  - **Détourage intelligent du fond blanc (`AssetImageCodec.makeWhitePaperTransparent`)** : lorsqu'une signature ou un tampon provient d'un scan ou d'une photo sur papier blanc (`.jpg`, `.png`, ou `.pdf` scanné), SimpleVector rend automatiquement le papier blanc transparent, préserve la couleur et la densité de l'encre et recadre les marges blanches superflues (avec une case à cocher **« Détourer le fond blanc (mode encre) »** dans l'inspecteur pour activer/désactiver ce traitement par élément ; lorsqu'il est désactivé sur un fichier `.pdf`, le tampon/signature est exporté en `100 %` vectoriel natif via `CGContext.drawPDFPage`).
+  - **Rotation libre sur le canevas et dans l'inspecteur (`rotationDegrees`)** :
+    - **Poignée de rotation interactive sur le canevas** : chaque élément sélectionné affiche une poignée circulaire au-dessus de son bord supérieur permettant de le tourner librement à la souris ou au trackpad à 60–120 Hz autour de son centre (maintenir `⇧` aimante par pas de `15°`, avec affichage en direct de l'angle en degrés).
+    - **Curseur et boutons rapides dans l'inspecteur** : curseur continu `-180° … +180°` accompagné des boutons rapides `-15°`, `0°`, `+15°` et `90°`, exporté fidèlement en PDF et en SVG.
+
 ## 0.1.5 — 2026-10-26
 
 - **Extraction et enregistrement direct des polices embarquées dans le PDF (`PDFEmbeddedFontRegistry`)** (`PDFCodec`, `CanvasViewportView`, `InspectorView`) :

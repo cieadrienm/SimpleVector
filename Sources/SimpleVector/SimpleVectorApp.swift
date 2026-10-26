@@ -123,14 +123,44 @@ struct SimpleVectorApp: App {
             }
             .keyboardShortcut("s", modifiers: [.command, .control])
 
+            Button(L("Importer un fichier de signature (PDF, PNG, JPG…)", "Import Signature File (PDF, PNG, JPG…)")) {
+                ctrl.importSignatureFileInteractive()
+            }
+
+            Button(L("Ouvrir le dossier Signatures dans le Finder", "Open Signatures Folder in Finder")) {
+                ctrl.openSignaturesFolderInFinder()
+            }
+
+            Divider()
+
             Menu(L("Apposer un tampon d'approbation (K)", "Place Approval Stamp (K)")) {
+                if !ctrl.customStamps.isEmpty {
+                    ForEach(ctrl.customStamps) { preset in
+                        Button(preset.title) {
+                            ctrl.activeCustomStampPresetID = preset.id
+                            ctrl.stampCustomStamp(preset)
+                        }
+                    }
+                    Divider()
+                }
                 ForEach(VectorStampKind.allCases) { kind in
                     Button(kind.defaultTitle) {
+                        ctrl.activeCustomStampPresetID = nil
                         ctrl.activeStampKind = kind
                         ctrl.stampApprovalBadge(kind: kind)
                     }
                 }
             }
+
+            Button(L("Importer un fichier de tampon (PDF, PNG, JPG…)", "Import Stamp File (PDF, PNG, JPG…)")) {
+                ctrl.importStampFileInteractive()
+            }
+
+            Button(L("Ouvrir le dossier Stamps dans le Finder", "Open Stamps Folder in Finder")) {
+                ctrl.openStampsFolderInFinder()
+            }
+
+            Divider()
 
             Button(L("Ajouter un bloc de texte (T)", "Add Text Block (T)")) {
                 ctrl.addTextBlock()

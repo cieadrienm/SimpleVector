@@ -202,4 +202,58 @@ struct SimpleVectorCoreTests {
         #expect(SimpleUpdater.isNewer(candidateVersion: "0.2.0", thanVersion: "0.1.0"))
         #expect(!SimpleUpdater.isNewer(candidateVersion: "0.1.0", thanVersion: "0.1.0"))
     }
+
+    @Test("Custom PDF and image signatures and stamps with white paper removal and arbitrary rotation")
+    func testCustomSignatureAndStampAssetsAndRotation() throws {
+        // Generate a small single-page vector PDF to act as a custom stamp/signature asset
+        var stampPage = VectorPage(title: "Stamp", width: 200, height: 100)
+        stampPage.elements.append(VectorElement(
+            name: "Circle",
+            kind: .shape(ShapePayload(shapeType: .ellipse)),
+            frame: VectorRect(x: 10, y: 10, width: 180, height: 80),
+            style: VectorStyle(strokeColorHex: "#1E3A8A", fillColorHex: nil, strokeWidth: 3.0)
+        ))
+        let pdfAssetData = try PDFCodec.exportPDF(document: VectorDocument(title: "StampAsset", pages: [stampPage]))
+        let pngAssetData = try #require(PDFCodec.renderPagePNG(page: stampPage, scale: 1.0))
+
+        #expect(AssetImageCodec.isPDF(data: pdfAssetData, ext: "pdf"))
+        #expect(!AssetImageCodec.isPDF(data: pngAssetData, ext: "png"))
+
+        let cgImg = try #require(AssetImageCodec.renderCGImage(from: pngAssetData, ext: "png", removeWhiteBackground: true))
+        #expect(cgImg.width > 10)
+        #expect(cgImg.height > 10)
+
+        let sigPreset = SignaturePreset(
+            title: "Signature Scannée",
+            signerName: "Adrien Mondot",
+            caption: "PNG",
+            colorHex: "#1E3A8A",
+            strokes: [],
+            assetData: pngAssetData,
+            assetExtension: "png",
+            removeWhiteBackground: true
+        )
+        let sigEl = VectorOperations.makeSignatureElement(preset: sigPreset, at: VectorPoint(x: 400, y: 700), includeDate: false)
+        #expect(sigEl.frame.width == 185)
+
+        let stampPreset = StampPreset(
+            title: "Tampon Compagnie",
+            assetData: pdfAssetData,
+            assetExtension: "pdf",
+            removeWhiteBackground: true
+        )
+        var stampEl = VectorOperations.makeCustomStampElement(preset: stampPreset, at: VectorPoint(x: 200, y: 700), rotationDegrees: -18.5)
+        #expect(abs(stampEl.rotationDegrees - (-18.5)) < 0.01)
+        stampEl.rotationDegrees = 32.5
+
+        var doc = VectorDocument(title: "SignedDoc", pages: [VectorPage(title: "Page 1")])
+        VectorOperations.addElement(sigEl, toPage: 0, in: &doc)
+        VectorOperations.addElement(stampEl, toPage: 0, in: &doc)
+
+        let exportedPDF = try PDFCodec.exportPDF(document: doc)
+        #expect(exportedPDF.count > 1000)
+        let exportedSVG = SVGCodec.exportSVG(document: doc)
+        #expect(exportedSVG.contains("data:image/png;base64,"))
+        #expect(exportedSVG.contains("rotate(32.5"))
+    }
 }

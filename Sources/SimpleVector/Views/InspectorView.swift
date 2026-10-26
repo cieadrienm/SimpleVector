@@ -128,14 +128,77 @@ struct InspectorView: View {
                     .frame(width: 44, alignment: .trailing)
             }
 
-            // Geometry & Z-Order
-            SectionHeader(L("Géométrie & Ordre", "Geometry & Order"))
+            // Geometry, Rotation & Z-Order
+            SectionHeader(L("Géométrie, Rotation & Ordre", "Geometry, Rotation & Order"))
 
             HStack(spacing: 6) {
                 coordBadge(label: "X", value: Int(round(el.frame.x)))
                 coordBadge(label: "Y", value: Int(round(el.frame.y)))
                 coordBadge(label: "L", value: Int(round(el.frame.width)))
                 coordBadge(label: "H", value: Int(round(el.frame.height)))
+            }
+
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 8) {
+                    Text(L("Rotation", "Angle"))
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.textDim.swiftUI)
+                        .frame(width: 52, alignment: .leading)
+                    Slider(
+                        value: Binding(
+                            get: { el.rotationDegrees },
+                            set: { deg in
+                                VectorOperations.updateElement(id: el.id, onPage: ctrl.currentPageIndex, in: &ctrl.document) { item in
+                                    item.rotationDegrees = deg
+                                }
+                            }
+                        ),
+                        in: -180...180
+                    )
+                    .tint(Theme.accent.swiftUI)
+                    Text(String(format: "%+.0f°", el.rotationDegrees))
+                        .font(.system(size: 10.5, design: .monospaced))
+                        .foregroundStyle(Theme.text.swiftUI)
+                        .frame(width: 42, alignment: .trailing)
+                }
+
+                HStack(spacing: 5) {
+                    TextButton(title: "-15°", compact: true) {
+                        ctrl.perform(L("Rotation -15°", "Rotated -15°")) { doc in
+                            VectorOperations.updateElement(id: el.id, onPage: ctrl.currentPageIndex, in: &doc) { item in
+                                var d = item.rotationDegrees - 15.0
+                                if d < -180.0 { d += 360.0 }
+                                item.rotationDegrees = d
+                            }
+                        }
+                    }
+                    TextButton(title: "0°", compact: true) {
+                        ctrl.perform(L("Rotation réinitialisée (0°)", "Rotation reset (0°)")) { doc in
+                            VectorOperations.updateElement(id: el.id, onPage: ctrl.currentPageIndex, in: &doc) { item in
+                                item.rotationDegrees = 0.0
+                            }
+                        }
+                    }
+                    TextButton(title: "+15°", compact: true) {
+                        ctrl.perform(L("Rotation +15°", "Rotated +15°")) { doc in
+                            VectorOperations.updateElement(id: el.id, onPage: ctrl.currentPageIndex, in: &doc) { item in
+                                var d = item.rotationDegrees + 15.0
+                                if d > 180.0 { d -= 360.0 }
+                                item.rotationDegrees = d
+                            }
+                        }
+                    }
+                    TextButton(title: "90°", symbol: "rotate.right", compact: true) {
+                        ctrl.perform(L("Rotation +90°", "Rotated +90°")) { doc in
+                            VectorOperations.updateElement(id: el.id, onPage: ctrl.currentPageIndex, in: &doc) { item in
+                                var d = item.rotationDegrees + 90.0
+                                if d > 180.0 { d -= 360.0 }
+                                item.rotationDegrees = d
+                            }
+                        }
+                    }
+                    Spacer()
+                }
             }
 
             HStack(spacing: 6) {
@@ -314,36 +377,57 @@ struct InspectorView: View {
     private func signatureInspectorControls(el: VectorElement, payload: SignaturePayload) -> some View {
         let ctrl = model.controller
         return VStack(alignment: .leading, spacing: 8) {
-            FieldRow(L("Signataire", "Signer"), width: 78) {
-                CommitField(value: payload.signerName, placeholder: "Adrien Mondot") { newSigner in
-                    ctrl.perform { doc in
-                        VectorOperations.updateElement(id: el.id, onPage: ctrl.currentPageIndex, in: &doc) { item in
-                            if case .signature(var s) = item.kind {
-                                s.signerName = newSigner
-                                item.kind = .signature(s)
+            if payload.assetData != nil {
+                Toggle(
+                    L("Détourer le fond blanc (mode encre)", "Remove white background (ink mode)"),
+                    isOn: Binding(
+                        get: { payload.removeWhiteBackground },
+                        set: { v in
+                            ctrl.perform(L("Fond de signature mis à jour", "Signature background updated")) { doc in
+                                VectorOperations.updateElement(id: el.id, onPage: ctrl.currentPageIndex, in: &doc) { item in
+                                    if case .signature(var s) = item.kind {
+                                        s.removeWhiteBackground = v
+                                        item.kind = .signature(s)
+                                    }
+                                }
+                            }
+                        }
+                    )
+                )
+                .font(.system(size: 11))
+                .foregroundStyle(Theme.text.swiftUI)
+            } else {
+                FieldRow(L("Signataire", "Signer"), width: 78) {
+                    CommitField(value: payload.signerName, placeholder: "Adrien Mondot") { newSigner in
+                        ctrl.perform { doc in
+                            VectorOperations.updateElement(id: el.id, onPage: ctrl.currentPageIndex, in: &doc) { item in
+                                if case .signature(var s) = item.kind {
+                                    s.signerName = newSigner
+                                    item.kind = .signature(s)
+                                }
                             }
                         }
                     }
                 }
-            }
-            FieldRow(L("Mention", "Caption"), width: 78) {
-                CommitField(value: payload.caption ?? "", placeholder: "cie Adrien M") { newCaption in
-                    ctrl.perform { doc in
-                        VectorOperations.updateElement(id: el.id, onPage: ctrl.currentPageIndex, in: &doc) { item in
-                            if case .signature(var s) = item.kind {
-                                s.caption = newCaption
-                                item.kind = .signature(s)
+                FieldRow(L("Mention", "Caption"), width: 78) {
+                    CommitField(value: payload.caption ?? "", placeholder: "cie Adrien M") { newCaption in
+                        ctrl.perform { doc in
+                            VectorOperations.updateElement(id: el.id, onPage: ctrl.currentPageIndex, in: &doc) { item in
+                                if case .signature(var s) = item.kind {
+                                    s.caption = newCaption
+                                    item.kind = .signature(s)
+                                }
                             }
                         }
                     }
                 }
-            }
-            TextButton(
-                title: L("Garder dans mes signatures", "Save to Signature Library"),
-                symbol: "star",
-                compact: true
-            ) {
-                ctrl.saveCustomSignature(from: el)
+                TextButton(
+                    title: L("Garder dans mes signatures", "Save to Signature Library"),
+                    symbol: "star",
+                    compact: true
+                ) {
+                    ctrl.saveCustomSignature(from: el)
+                }
             }
         }
     }
@@ -395,25 +479,46 @@ struct InspectorView: View {
     private func stampInspectorControls(el: VectorElement, payload: StampPayload) -> some View {
         let ctrl = model.controller
         return VStack(alignment: .leading, spacing: 8) {
-            FieldRow(L("Titre", "Title"), width: 78) {
-                CommitField(value: payload.title, placeholder: "BON POUR ACCORD") { newTitle in
-                    ctrl.perform { doc in
-                        VectorOperations.updateElement(id: el.id, onPage: ctrl.currentPageIndex, in: &doc) { item in
-                            if case .stamp(var st) = item.kind {
-                                st.title = newTitle
-                                item.kind = .stamp(st)
+            if payload.assetData != nil {
+                Toggle(
+                    L("Détourer le fond blanc (mode encre)", "Remove white background (ink mode)"),
+                    isOn: Binding(
+                        get: { payload.removeWhiteBackground },
+                        set: { v in
+                            ctrl.perform(L("Fond du tampon mis à jour", "Stamp background updated")) { doc in
+                                VectorOperations.updateElement(id: el.id, onPage: ctrl.currentPageIndex, in: &doc) { item in
+                                    if case .stamp(var st) = item.kind {
+                                        st.removeWhiteBackground = v
+                                        item.kind = .stamp(st)
+                                    }
+                                }
+                            }
+                        }
+                    )
+                )
+                .font(.system(size: 11))
+                .foregroundStyle(Theme.text.swiftUI)
+            } else {
+                FieldRow(L("Titre", "Title"), width: 78) {
+                    CommitField(value: payload.title, placeholder: "BON POUR ACCORD") { newTitle in
+                        ctrl.perform { doc in
+                            VectorOperations.updateElement(id: el.id, onPage: ctrl.currentPageIndex, in: &doc) { item in
+                                if case .stamp(var st) = item.kind {
+                                    st.title = newTitle
+                                    item.kind = .stamp(st)
+                                }
                             }
                         }
                     }
                 }
-            }
-            FieldRow(L("Sous-titre", "Subtitle"), width: 78) {
-                CommitField(value: payload.subtitle, placeholder: "cie Adrien M") { newSub in
-                    ctrl.perform { doc in
-                        VectorOperations.updateElement(id: el.id, onPage: ctrl.currentPageIndex, in: &doc) { item in
-                            if case .stamp(var st) = item.kind {
-                                st.subtitle = newSub
-                                item.kind = .stamp(st)
+                FieldRow(L("Sous-titre", "Subtitle"), width: 78) {
+                    CommitField(value: payload.subtitle, placeholder: "cie Adrien M") { newSub in
+                        ctrl.perform { doc in
+                            VectorOperations.updateElement(id: el.id, onPage: ctrl.currentPageIndex, in: &doc) { item in
+                                if case .stamp(var st) = item.kind {
+                                    st.subtitle = newSub
+                                    item.kind = .stamp(st)
+                                }
                             }
                         }
                     }
@@ -427,16 +532,43 @@ struct InspectorView: View {
     private var signatureLibrarySection: some View {
         let ctrl = model.controller
         return VStack(alignment: .leading, spacing: 8) {
-            SectionHeader(L("Signatures calligraphiques", "Calligraphic Signatures")) {
-                TextButton(
-                    title: L("Signer la page", "Sign Page"),
-                    symbol: "signature",
-                    prominent: true,
-                    compact: true
-                ) {
-                    ctrl.stampActiveSignature()
+            SectionHeader(L("Signatures", "Signatures")) {
+                HStack(spacing: 4) {
+                    IconButton(
+                        symbol: "folder",
+                        helpText: L("Ouvrir ~/Library/Application Support/SimpleVector/Signatures dans le Finder", "Open Signatures folder in Finder")
+                    ) {
+                        ctrl.openSignaturesFolderInFinder()
+                    }
+                    IconButton(
+                        symbol: "arrow.clockwise",
+                        helpText: L("Actualiser le dossier Signatures", "Reload Signatures folder")
+                    ) {
+                        ctrl.reloadSignaturesAndStampsFromDisk()
+                    }
+                    TextButton(
+                        title: L("+ Fichier…", "+ File…"),
+                        symbol: "plus",
+                        compact: true
+                    ) {
+                        ctrl.importSignatureFileInteractive()
+                    }
+                    TextButton(
+                        title: L("Signer", "Sign"),
+                        symbol: "signature",
+                        prominent: true,
+                        compact: true
+                    ) {
+                        ctrl.stampActiveSignature()
+                    }
                 }
             }
+
+            Text("~/Library/Application Support/SimpleVector/Signatures")
+                .font(.system(size: 9.5, design: .monospaced))
+                .foregroundStyle(Theme.textFaint.swiftUI)
+                .lineLimit(1)
+                .truncationMode(.middle)
 
             ForEach(ctrl.signatures) { preset in
                 let isSelected = preset.id == ctrl.activeSignaturePresetID
@@ -452,9 +584,11 @@ struct InspectorView: View {
                             Text(preset.title)
                                 .font(.system(size: 11.5, weight: .semibold))
                                 .foregroundStyle(Theme.text.swiftUI)
-                            Text(preset.caption)
+                                .lineLimit(1)
+                            Text(preset.fileURL != nil ? L("Fichier \(preset.caption)", "File \(preset.caption)") : preset.caption)
                                 .font(.system(size: 10))
                                 .foregroundStyle(Theme.textDim.swiftUI)
+                                .lineLimit(1)
                         }
                         Spacer()
                         if isSelected {
@@ -484,12 +618,83 @@ struct InspectorView: View {
     private var quickStampsSection: some View {
         let ctrl = model.controller
         return VStack(alignment: .leading, spacing: 8) {
-            SectionHeader(L("Tampons & Visas rapides", "Quick Stamps & Visas"))
+            SectionHeader(L("Tampons & Visas", "Stamps & Visas")) {
+                HStack(spacing: 4) {
+                    IconButton(
+                        symbol: "folder",
+                        helpText: L("Ouvrir ~/Library/Application Support/SimpleVector/Stamps dans le Finder", "Open Stamps folder in Finder")
+                    ) {
+                        ctrl.openStampsFolderInFinder()
+                    }
+                    IconButton(
+                        symbol: "arrow.clockwise",
+                        helpText: L("Actualiser le dossier Stamps", "Reload Stamps folder")
+                    ) {
+                        ctrl.reloadSignaturesAndStampsFromDisk()
+                    }
+                    TextButton(
+                        title: L("+ Fichier…", "+ File…"),
+                        symbol: "plus",
+                        compact: true
+                    ) {
+                        ctrl.importStampFileInteractive()
+                    }
+                }
+            }
+
+            Text("~/Library/Application Support/SimpleVector/Stamps")
+                .font(.system(size: 9.5, design: .monospaced))
+                .foregroundStyle(Theme.textFaint.swiftUI)
+                .lineLimit(1)
+                .truncationMode(.middle)
+
+            if !ctrl.customStamps.isEmpty {
+                ForEach(ctrl.customStamps) { preset in
+                    let isSelected = ctrl.activeCustomStampPresetID == preset.id
+                    Button {
+                        ctrl.activeCustomStampPresetID = preset.id
+                        ctrl.stampCustomStamp(preset)
+                    } label: {
+                        HStack(spacing: 10) {
+                            StampMiniPreview(preset: preset)
+                                .frame(width: 56, height: 32)
+                                .background(RoundedRectangle(cornerRadius: 4).fill(Color.white))
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(preset.title)
+                                    .font(.system(size: 11.5, weight: .semibold))
+                                    .foregroundStyle(Theme.text.swiftUI)
+                                    .lineLimit(1)
+                                Text(L("Fichier \(preset.assetExtension.uppercased()) · Cliquer pour apposer", "File \(preset.assetExtension.uppercased()) · Click to place"))
+                                    .font(.system(size: 9.5))
+                                    .foregroundStyle(Theme.textDim.swiftUI)
+                                    .lineLimit(1)
+                            }
+                            Spacer()
+                            Image(systemName: isSelected ? "checkmark.circle.fill" : "seal.fill")
+                                .font(.system(size: 12))
+                                .foregroundStyle(isSelected ? Theme.accent.swiftUI : Theme.textDim.swiftUI)
+                        }
+                        .padding(7)
+                        .background(
+                            RoundedRectangle(cornerRadius: 6)
+                                .fill(isSelected ? Theme.laneSelected.swiftUI : Theme.lane.swiftUI)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 6)
+                                        .strokeBorder(isSelected ? Theme.accent.swiftUI.opacity(0.6) : Color.clear, lineWidth: 1)
+                                )
+                        )
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
 
             LazyVGrid(columns: [GridItem(.flexible(), spacing: 6), GridItem(.flexible(), spacing: 6)], spacing: 6) {
                 ForEach([VectorStampKind.approved, .signed, .stagePlot, .confidential, .check, .draft]) { kind in
                     let rgb = RGBAColor(hex: kind.defaultColorHex) ?? RGBAColor(r: 0.2, g: 0.7, b: 0.4)
                     Button {
+                        ctrl.activeCustomStampPresetID = nil
                         ctrl.activeStampKind = kind
                         ctrl.stampApprovalBadge(kind: kind)
                     } label: {
@@ -619,16 +824,49 @@ private struct SignatureMiniPreview: View {
     let preset: SignaturePreset
 
     var body: some View {
-        Canvas { ctx, size in
-            let rgb = RGBAColor(hex: preset.colorHex) ?? RGBAColor(r: 0.12, g: 0.23, b: 0.54)
-            var path = Path()
-            for stroke in preset.strokes where !stroke.isEmpty {
-                path.move(to: CGPoint(x: stroke[0].x * size.width, y: stroke[0].y * size.height))
-                for pt in stroke.dropFirst() {
-                    path.addLine(to: CGPoint(x: pt.x * size.width, y: pt.y * size.height))
+        if let assetData = preset.assetData, !assetData.isEmpty,
+           let nsImg = VectorSceneRenderCache.shared.assetImage(
+               for: assetData,
+               ext: preset.assetExtension,
+               removeWhiteBackground: preset.removeWhiteBackground
+           ) {
+            Image(nsImage: nsImg)
+                .resizable()
+                .scaledToFit()
+                .padding(2)
+        } else {
+            Canvas { ctx, size in
+                let rgb = RGBAColor(hex: preset.colorHex) ?? RGBAColor(r: 0.12, g: 0.23, b: 0.54)
+                var path = Path()
+                for stroke in preset.strokes where !stroke.isEmpty {
+                    path.move(to: CGPoint(x: stroke[0].x * size.width, y: stroke[0].y * size.height))
+                    for pt in stroke.dropFirst() {
+                        path.addLine(to: CGPoint(x: pt.x * size.width, y: pt.y * size.height))
+                    }
                 }
+                ctx.stroke(path, with: .color(Color(red: rgb.r, green: rgb.g, blue: rgb.b)), style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
             }
-            ctx.stroke(path, with: .color(Color(red: rgb.r, green: rgb.g, blue: rgb.b)), style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
+        }
+    }
+}
+
+private struct StampMiniPreview: View {
+    let preset: StampPreset
+
+    var body: some View {
+        if let nsImg = VectorSceneRenderCache.shared.assetImage(
+            for: preset.assetData,
+            ext: preset.assetExtension,
+            removeWhiteBackground: preset.removeWhiteBackground
+        ) {
+            Image(nsImage: nsImg)
+                .resizable()
+                .scaledToFit()
+                .padding(2)
+        } else {
+            Image(systemName: "seal")
+                .font(.system(size: 13))
+                .foregroundStyle(Theme.accent.swiftUI)
         }
     }
 }

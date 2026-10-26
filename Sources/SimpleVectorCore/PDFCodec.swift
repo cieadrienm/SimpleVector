@@ -850,31 +850,41 @@ public enum PDFCodec {
             }
 
         case .signature(let sig):
-            let ink = strokeColor ?? RGBAColor(hex: "#1E3A8A")!
-            ctx.setStrokeColor(ink.cgColor)
-            ctx.setLineWidth(lineWidth)
-            ctx.setLineCap(.round)
-            ctx.setLineJoin(.round)
-            for stroke in sig.strokes where !stroke.isEmpty {
-                ctx.move(to: el.denormalize(stroke[0]).cgPoint)
-                for pt in stroke.dropFirst() {
-                    ctx.addLine(to: el.denormalize(pt).cgPoint)
-                }
-                ctx.strokePath()
-            }
-            let meta = [sig.signerName, sig.caption, sig.dateLabel].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
-            if !meta.isEmpty {
-                let metaFont = CTFontCreateWithName("HelveticaNeue" as CFString, 8.5, nil)
-                drawCoreTextLine(
-                    meta,
-                    at: CGPoint(x: f.minX + 2, y: f.maxY - 2),
-                    ctFont: metaFont,
-                    kern: 0.0,
-                    color: ink.cgColor,
-                    alignment: .left,
-                    boxWidth: f.width - 4,
-                    in: ctx
+            if let assetData = sig.assetData {
+                drawExternalAsset(
+                    data: assetData,
+                    ext: sig.assetExtension,
+                    removeWhiteBackground: sig.removeWhiteBackground,
+                    in: f.cgRect,
+                    ctx: ctx
                 )
+            } else {
+                let ink = strokeColor ?? RGBAColor(hex: "#1E3A8A")!
+                ctx.setStrokeColor(ink.cgColor)
+                ctx.setLineWidth(lineWidth)
+                ctx.setLineCap(.round)
+                ctx.setLineJoin(.round)
+                for stroke in sig.strokes where !stroke.isEmpty {
+                    ctx.move(to: el.denormalize(stroke[0]).cgPoint)
+                    for pt in stroke.dropFirst() {
+                        ctx.addLine(to: el.denormalize(pt).cgPoint)
+                    }
+                    ctx.strokePath()
+                }
+                let meta = [sig.signerName, sig.caption, sig.dateLabel].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
+                if !meta.isEmpty {
+                    let metaFont = CTFontCreateWithName("HelveticaNeue" as CFString, 8.5, nil)
+                    drawCoreTextLine(
+                        meta,
+                        at: CGPoint(x: f.minX + 2, y: f.maxY - 2),
+                        ctFont: metaFont,
+                        kern: 0.0,
+                        color: ink.cgColor,
+                        alignment: .left,
+                        boxWidth: f.width - 4,
+                        in: ctx
+                    )
+                }
             }
 
         case .text(let t):
@@ -898,49 +908,94 @@ public enum PDFCodec {
             }
 
         case .stamp(let st):
-            let color = strokeColor ?? RGBAColor(hex: st.stampKind.defaultColorHex) ?? RGBAColor(r: 0.1, g: 0.6, b: 0.3)
-            let outerPath = CGPath(roundedRect: f.cgRect, cornerWidth: 6, cornerHeight: 6, transform: nil)
-            ctx.setFillColor(RGBAColor(r: color.r, g: color.g, b: color.b, a: 0.10).cgColor)
-            ctx.addPath(outerPath)
-            ctx.fillPath()
-            ctx.setStrokeColor(color.cgColor)
-            ctx.setLineWidth(2.2)
-            ctx.addPath(outerPath)
-            ctx.strokePath()
-
-            let innerRect = f.cgRect.insetBy(dx: 3.5, dy: 3.5)
-            if innerRect.width > 4 && innerRect.height > 4 {
-                let innerPath = CGPath(roundedRect: innerRect, cornerWidth: 4, cornerHeight: 4, transform: nil)
-                ctx.setLineWidth(0.9)
-                ctx.addPath(innerPath)
+            if let assetData = st.assetData {
+                drawExternalAsset(
+                    data: assetData,
+                    ext: st.assetExtension,
+                    removeWhiteBackground: st.removeWhiteBackground,
+                    in: f.cgRect,
+                    ctx: ctx
+                )
+            } else {
+                let color = strokeColor ?? RGBAColor(hex: st.stampKind.defaultColorHex) ?? RGBAColor(r: 0.1, g: 0.6, b: 0.3)
+                let outerPath = CGPath(roundedRect: f.cgRect, cornerWidth: 6, cornerHeight: 6, transform: nil)
+                ctx.setFillColor(RGBAColor(r: color.r, g: color.g, b: color.b, a: 0.10).cgColor)
+                ctx.addPath(outerPath)
+                ctx.fillPath()
+                ctx.setStrokeColor(color.cgColor)
+                ctx.setLineWidth(2.2)
+                ctx.addPath(outerPath)
                 ctx.strokePath()
-            }
 
-            let titleFont = CTFontCreateWithName("HelveticaNeue-Bold" as CFString, CGFloat(min(14.0, f.height * 0.30)), nil)
-            drawCoreTextLine(
-                st.title,
-                at: CGPoint(x: f.minX, y: f.minY + f.height * 0.52),
-                ctFont: titleFont,
-                kern: 0.0,
-                color: color.cgColor,
-                alignment: .center,
-                boxWidth: f.width,
-                in: ctx
-            )
-            if !st.subtitle.isEmpty {
-                let subFont = CTFontCreateWithName("HelveticaNeue" as CFString, CGFloat(min(9.0, f.height * 0.18)), nil)
+                let innerRect = f.cgRect.insetBy(dx: 3.5, dy: 3.5)
+                if innerRect.width > 4 && innerRect.height > 4 {
+                    let innerPath = CGPath(roundedRect: innerRect, cornerWidth: 4, cornerHeight: 4, transform: nil)
+                    ctx.setLineWidth(0.9)
+                    ctx.addPath(innerPath)
+                    ctx.strokePath()
+                }
+
+                let titleFont = CTFontCreateWithName("HelveticaNeue-Bold" as CFString, CGFloat(min(14.0, f.height * 0.30)), nil)
                 drawCoreTextLine(
-                    st.subtitle,
-                    at: CGPoint(x: f.minX, y: f.minY + f.height * 0.80),
-                    ctFont: subFont,
+                    st.title,
+                    at: CGPoint(x: f.minX, y: f.minY + f.height * 0.52),
+                    ctFont: titleFont,
                     kern: 0.0,
                     color: color.cgColor,
                     alignment: .center,
                     boxWidth: f.width,
                     in: ctx
                 )
+                if !st.subtitle.isEmpty {
+                    let subFont = CTFontCreateWithName("HelveticaNeue" as CFString, CGFloat(min(9.0, f.height * 0.18)), nil)
+                    drawCoreTextLine(
+                        st.subtitle,
+                        at: CGPoint(x: f.minX, y: f.minY + f.height * 0.80),
+                        ctFont: subFont,
+                        kern: 0.0,
+                        color: color.cgColor,
+                        alignment: .center,
+                        boxWidth: f.width,
+                        in: ctx
+                    )
+                }
             }
         }
+    }
+
+    private static func drawExternalAsset(
+        data: Data,
+        ext: String?,
+        removeWhiteBackground: Bool,
+        in rect: CGRect,
+        ctx: CGContext
+    ) {
+        if !removeWhiteBackground,
+           AssetImageCodec.isPDF(data: data, ext: ext),
+           let provider = CGDataProvider(data: data as CFData),
+           let cgPDF = CGPDFDocument(provider),
+           let page = cgPDF.page(at: 1) {
+            let box = page.getBoxRect(.cropBox).width > 1 ? page.getBoxRect(.cropBox) : page.getBoxRect(.mediaBox)
+            ctx.saveGState()
+            // Flip from top-left SimpleVector coordinates to bottom-left PDF coordinates inside rect
+            ctx.translateBy(x: rect.minX, y: rect.maxY)
+            ctx.scaleBy(x: rect.width / max(1, box.width), y: -rect.height / max(1, box.height))
+            ctx.translateBy(x: -box.minX, y: -box.minY)
+            ctx.drawPDFPage(page)
+            ctx.restoreGState()
+            return
+        }
+        guard let cgImg = AssetImageCodec.renderCGImage(
+            from: data,
+            ext: ext,
+            targetMaxDimension: 1200,
+            removeWhiteBackground: removeWhiteBackground
+        ) else { return }
+        ctx.saveGState()
+        ctx.translateBy(x: rect.minX, y: rect.maxY)
+        ctx.scaleBy(x: 1, y: -1)
+        ctx.draw(cgImg, in: CGRect(x: 0, y: 0, width: rect.width, height: rect.height))
+        ctx.restoreGState()
     }
 
     private static func drawArrowHead(in ctx: CGContext, from p0: CGPoint, to p1: CGPoint, color: CGColor, size: CGFloat) {

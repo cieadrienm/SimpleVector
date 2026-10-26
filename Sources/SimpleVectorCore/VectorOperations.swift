@@ -187,9 +187,22 @@ public enum VectorOperations {
     ) -> VectorElement {
         let df = DateFormatter()
         df.dateFormat = "dd/MM/yyyy"
-        let dateStr = includeDate ? df.string(from: Date()) : nil
-        let width = 190.0
-        let height = 74.0
+        let dateStr = (includeDate && preset.assetData == nil) ? df.string(from: Date()) : nil
+        let width: Double
+        let height: Double
+        if let data = preset.assetData {
+            let aspect = AssetImageCodec.aspectRatio(for: data, ext: preset.assetExtension)
+            if aspect >= 1.0 {
+                width = 185.0
+                height = max(36.0, round(width / aspect))
+            } else {
+                height = 110.0
+                width = max(42.0, round(height * aspect))
+            }
+        } else {
+            width = 190.0
+            height = 74.0
+        }
         let rect = VectorRect(
             x: max(12, center.x - width * 0.5),
             y: max(12, center.y - height * 0.5),
@@ -201,8 +214,11 @@ public enum VectorOperations {
             kind: .signature(SignaturePayload(
                 signerName: preset.signerName,
                 dateLabel: dateStr,
-                caption: preset.caption,
-                strokes: preset.strokes
+                caption: preset.assetData == nil ? preset.caption : nil,
+                strokes: preset.strokes,
+                assetData: preset.assetData,
+                assetExtension: preset.assetExtension,
+                removeWhiteBackground: preset.removeWhiteBackground
             )),
             frame: rect,
             style: VectorStyle(strokeColorHex: preset.colorHex, fillColorHex: nil, strokeWidth: 2.2, opacity: 1.0)
@@ -282,6 +298,48 @@ public enum VectorOperations {
                 fillColorHex: kind.defaultColorHex,
                 strokeWidth: 2.2,
                 opacity: 0.94
+            )
+        )
+    }
+
+    public static func makeCustomStampElement(
+        preset: StampPreset,
+        at center: VectorPoint,
+        rotationDegrees: Double = -4.0
+    ) -> VectorElement {
+        let aspect = AssetImageCodec.aspectRatio(for: preset.assetData, ext: preset.assetExtension)
+        let width: Double
+        let height: Double
+        if aspect >= 1.0 {
+            width = 165.0
+            height = max(44.0, round(width / aspect))
+        } else {
+            height = 140.0
+            width = max(44.0, round(height * aspect))
+        }
+        let payload = StampPayload(
+            stampKind: .approved,
+            title: preset.title,
+            subtitle: "",
+            assetData: preset.assetData,
+            assetExtension: preset.assetExtension,
+            removeWhiteBackground: preset.removeWhiteBackground
+        )
+        return VectorElement(
+            name: preset.title,
+            kind: .stamp(payload),
+            frame: VectorRect(
+                x: max(12, center.x - width * 0.5),
+                y: max(12, center.y - height * 0.5),
+                width: width,
+                height: height
+            ),
+            rotationDegrees: rotationDegrees,
+            style: VectorStyle(
+                strokeColorHex: "#1E3A8A",
+                fillColorHex: nil,
+                strokeWidth: 0,
+                opacity: 0.96
             )
         )
     }

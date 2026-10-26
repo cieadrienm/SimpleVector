@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import ImageIO
 
 // MARK: - Basic Geometry
 
@@ -281,17 +282,27 @@ public struct SignaturePayload: Equatable, Hashable, Codable, Sendable {
     public var caption: String?
     /// Normalized strokes inside `0.0 ... 1.0` of the element's `frame`.
     public var strokes: [[VectorPoint]]
+    /// Optional external PDF or image (`.pdf`, `.png`, `.jpg`, `.heic`, `.tiff`) backing this signature.
+    public var assetData: Data?
+    public var assetExtension: String?
+    public var removeWhiteBackground: Bool
 
     public init(
         signerName: String,
         dateLabel: String? = nil,
         caption: String? = nil,
-        strokes: [[VectorPoint]]
+        strokes: [[VectorPoint]] = [],
+        assetData: Data? = nil,
+        assetExtension: String? = nil,
+        removeWhiteBackground: Bool = true
     ) {
         self.signerName = signerName
         self.dateLabel = dateLabel
         self.caption = caption
         self.strokes = strokes
+        self.assetData = assetData
+        self.assetExtension = assetExtension
+        self.removeWhiteBackground = removeWhiteBackground
     }
 }
 
@@ -415,17 +426,33 @@ public struct StampPayload: Equatable, Hashable, Codable, Sendable {
     public var stampKind: VectorStampKind
     public var title: String
     public var subtitle: String
+    /// Optional external PDF or image (`.pdf`, `.png`, `.jpg`, `.heic`, `.tiff`) backing this stamp.
+    public var assetData: Data?
+    public var assetExtension: String?
+    public var removeWhiteBackground: Bool
 
-    public init(stampKind: VectorStampKind = .approved, title: String? = nil, subtitle: String? = nil) {
+    public init(
+        stampKind: VectorStampKind = .approved,
+        title: String? = nil,
+        subtitle: String? = nil,
+        assetData: Data? = nil,
+        assetExtension: String? = nil,
+        removeWhiteBackground: Bool = true
+    ) {
         self.stampKind = stampKind
         self.title = title ?? stampKind.defaultTitle
         if let subtitle {
             self.subtitle = subtitle
+        } else if assetData != nil {
+            self.subtitle = ""
         } else {
             let df = DateFormatter()
             df.dateFormat = "dd/MM/yyyy"
             self.subtitle = "cie Adrien M · \(df.string(from: Date()))"
         }
+        self.assetData = assetData
+        self.assetExtension = assetExtension
+        self.removeWhiteBackground = removeWhiteBackground
     }
 }
 
@@ -754,6 +781,10 @@ public struct SignaturePreset: Identifiable, Equatable, Codable, Sendable {
     public var caption: String
     public var colorHex: String
     public var strokes: [[VectorPoint]]
+    public var assetData: Data?
+    public var assetExtension: String?
+    public var removeWhiteBackground: Bool
+    public var fileURL: URL?
 
     public init(
         id: UUID = UUID(),
@@ -761,7 +792,11 @@ public struct SignaturePreset: Identifiable, Equatable, Codable, Sendable {
         signerName: String,
         caption: String,
         colorHex: String = "#1E3A8A",
-        strokes: [[VectorPoint]]
+        strokes: [[VectorPoint]] = [],
+        assetData: Data? = nil,
+        assetExtension: String? = nil,
+        removeWhiteBackground: Bool = true,
+        fileURL: URL? = nil
     ) {
         self.id = id
         self.title = title
@@ -769,6 +804,10 @@ public struct SignaturePreset: Identifiable, Equatable, Codable, Sendable {
         self.caption = caption
         self.colorHex = colorHex
         self.strokes = strokes
+        self.assetData = assetData
+        self.assetExtension = assetExtension
+        self.removeWhiteBackground = removeWhiteBackground
+        self.fileURL = fileURL
     }
 
     public static let defaults: [SignaturePreset] = [
@@ -849,5 +888,231 @@ public struct SignaturePreset: Identifiable, Equatable, Codable, Sendable {
             StrokeSmoother.smooth(mStroke, iterations: 2),
             StrokeSmoother.smooth(flourish, iterations: 2),
         ]
+    }
+}
+
+// MARK: - Custom Stamp Presets & External Asset Image / PDF Decoder
+
+public struct StampPreset: Identifiable, Equatable, Codable, Sendable {
+    public var id: UUID
+    public var title: String
+    public var assetData: Data
+    public var assetExtension: String
+    public var removeWhiteBackground: Bool
+    public var fileURL: URL?
+
+    public init(
+        id: UUID = UUID(),
+        title: String,
+        assetData: Data,
+        assetExtension: String,
+        removeWhiteBackground: Bool = true,
+        fileURL: URL? = nil
+    ) {
+        self.id = id
+        self.title = title
+        self.assetData = assetData
+        self.assetExtension = assetExtension
+        self.removeWhiteBackground = removeWhiteBackground
+        self.fileURL = fileURL
+    }
+}
+
+/// Decodes PDF, PNG, JPG, TIFF, HEIC, or SVG assets for signatures and stamps, computes their natural aspect ratio,
+/// and optionally converts white paper backgrounds into smooth transparent alpha (`removeWhiteBackground`).
+public enum AssetImageCodec {
+    public static let supportedExtensions: Set<String> = [
+        "pdf", "png", "jpg", "jpeg", "tiff", "tif", "heic", "webp", "svg"
+    ]
+
+    public static func isPDF(data: Data, ext: String?) -> Bool {
+        if ext?.lowercased() == "pdf" { return true }
+        guard data.count >= 5 else { return false }
+        return String(decoding: data.prefix(5), as: UTF8.self) == "%PDF-"
+    }
+
+    /// Returns the natural aspect ratio (`width / height`, clamped to `0.25 ... 6.0`) of an asset.
+    public static func aspectRatio(for data: Data, ext: String?) -> Double {
+        if isPDF(data: data, ext: ext),
+           let provider = CGDataProvider(data: data as CFData),
+           let cgPDF = CGPDFDocument(provider),
+           let page = cgPDF.page(at: 1) {
+            let box = page.getBoxRect(.cropBox)
+            let w = Double(box.width > 1 ? box.width : page.getBoxRect(.mediaBox).width)
+            let h = Double(box.height > 1 ? box.height : page.getBoxRect(.mediaBox).height)
+            if w > 1 && h > 1 {
+                return min(6.0, max(0.25, w / h))
+            }
+        }
+        if let src = CGImageSourceCreateWithData(data as CFData, nil),
+           let img = CGImageSourceCreateImageAtIndex(src, 0, nil),
+           img.width > 0, img.height > 0 {
+            return min(6.0, max(0.25, Double(img.width) / Double(img.height)))
+        }
+        return 2.4
+    }
+
+    /// Renders a PDF or raster image asset into a `CGImage`, optionally removing a white paper background
+    /// (ideal for scanned signatures or rubber stamps on white paper) and auto-cropping excess transparent margins.
+    public static func renderCGImage(
+        from data: Data,
+        ext: String?,
+        targetMaxDimension: Int = 640,
+        removeWhiteBackground: Bool
+    ) -> CGImage? {
+        let baseImage: CGImage?
+        if isPDF(data: data, ext: ext),
+           let provider = CGDataProvider(data: data as CFData),
+           let cgPDF = CGPDFDocument(provider),
+           let page = cgPDF.page(at: 1) {
+            let box = page.getBoxRect(.cropBox).width > 1 ? page.getBoxRect(.cropBox) : page.getBoxRect(.mediaBox)
+            let aspect = max(0.2, min(6.0, Double(box.width) / Double(max(1, box.height))))
+            let pw: Int
+            let ph: Int
+            if aspect >= 1.0 {
+                pw = max(32, targetMaxDimension)
+                ph = max(32, Int(round(Double(targetMaxDimension) / aspect)))
+            } else {
+                ph = max(32, targetMaxDimension)
+                pw = max(32, Int(round(Double(targetMaxDimension) * aspect)))
+            }
+            guard let cs = CGColorSpace(name: CGColorSpace.sRGB),
+                  let ctx = CGContext(
+                      data: nil,
+                      width: pw,
+                      height: ph,
+                      bitsPerComponent: 8,
+                      bytesPerRow: pw * 4,
+                      space: cs,
+                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+                  ) else { return nil }
+            ctx.clear(CGRect(x: 0, y: 0, width: pw, height: ph))
+            ctx.scaleBy(x: CGFloat(pw) / max(1, box.width), y: CGFloat(ph) / max(1, box.height))
+            ctx.translateBy(x: -box.minX, y: -box.minY)
+            ctx.drawPDFPage(page)
+            baseImage = ctx.makeImage()
+        } else if ext?.lowercased() == "svg",
+                  let doc = try? SVGCodec.importSVG(data: data, title: "Asset"),
+                  let firstPage = doc.pages.first,
+                  let pngData = PDFCodec.renderPagePNG(page: firstPage, scale: 2.0),
+                  let src = CGImageSourceCreateWithData(pngData as CFData, nil) {
+            baseImage = CGImageSourceCreateImageAtIndex(src, 0, nil)
+        } else if let src = CGImageSourceCreateWithData(data as CFData, nil) {
+            baseImage = CGImageSourceCreateImageAtIndex(src, 0, nil)
+        } else {
+            baseImage = nil
+        }
+
+        guard let cgImg = baseImage else { return nil }
+        guard removeWhiteBackground else { return cgImg }
+        return makeWhitePaperTransparent(cgImg)
+    }
+
+    /// Converts white/near-white paper background pixels (`luma >= 238`) into transparent pixels with a smooth
+    /// anti-aliased ramp (`185 ... 238`), and crops excess empty borders if the asset was scanned on a full A4 sheet.
+    private static func makeWhitePaperTransparent(_ source: CGImage) -> CGImage {
+        let w = source.width
+        let h = source.height
+        guard w > 2, h > 2, let cs = CGColorSpace(name: CGColorSpace.sRGB) else { return source }
+        let bpr = w * 4
+        var pixels = [UInt8](repeating: 0, count: h * bpr)
+
+        let drawn = pixels.withUnsafeMutableBytes { ptr -> Bool in
+            guard let base = ptr.baseAddress,
+                  let ctx = CGContext(
+                      data: base,
+                      width: w,
+                      height: h,
+                      bitsPerComponent: 8,
+                      bytesPerRow: bpr,
+                      space: cs,
+                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+                  ) else { return false }
+            ctx.clear(CGRect(x: 0, y: 0, width: w, height: h))
+            ctx.draw(source, in: CGRect(x: 0, y: 0, width: w, height: h))
+            return true
+        }
+        guard drawn else { return source }
+
+        var minX = w, maxX = -1, minY = h, maxY = -1
+        for y in 0..<h {
+            let row = y * bpr
+            for x in 0..<w {
+                let idx = row + x * 4
+                let a = Int(pixels[idx + 3])
+                guard a > 8 else {
+                    pixels[idx] = 0; pixels[idx + 1] = 0; pixels[idx + 2] = 0; pixels[idx + 3] = 0
+                    continue
+                }
+                // Unpremultiply RGB to measure true paper luminance
+                let r = min(255, (Int(pixels[idx]) * 255) / max(1, a))
+                let g = min(255, (Int(pixels[idx + 1]) * 255) / max(1, a))
+                let b = min(255, (Int(pixels[idx + 2]) * 255) / max(1, a))
+                let luma = (299 * r + 587 * g + 114 * b) / 1000
+                let chroma = max(r, max(g, b)) - min(r, min(g, b))
+
+                // Keep saturated colored stamps (blue/red/green ink) even at higher brightness
+                let effectiveLuma = max(0, luma - chroma / 2)
+                let newAlpha: Int
+                if effectiveLuma >= 238 {
+                    newAlpha = 0
+                } else if effectiveLuma > 180 {
+                    let t = Double(238 - effectiveLuma) / Double(238 - 180)
+                    newAlpha = min(a, Int(round(Double(a) * t)))
+                } else {
+                    newAlpha = a
+                }
+
+                if newAlpha <= 4 {
+                    pixels[idx] = 0; pixels[idx + 1] = 0; pixels[idx + 2] = 0; pixels[idx + 3] = 0
+                } else {
+                    // Premultiply RGB with newAlpha
+                    pixels[idx] = UInt8((r * newAlpha) / 255)
+                    pixels[idx + 1] = UInt8((g * newAlpha) / 255)
+                    pixels[idx + 2] = UInt8((b * newAlpha) / 255)
+                    pixels[idx + 3] = UInt8(newAlpha)
+                    if newAlpha >= 24 {
+                        if x < minX { minX = x }
+                        if x > maxX { maxX = x }
+                        if y < minY { minY = y }
+                        if y > maxY { maxY = y }
+                    }
+                }
+            }
+        }
+
+        let processedImage = pixels.withUnsafeMutableBytes { ptr -> CGImage? in
+            guard let base = ptr.baseAddress,
+                  let ctx = CGContext(
+                      data: base,
+                      width: w,
+                      height: h,
+                      bitsPerComponent: 8,
+                      bytesPerRow: bpr,
+                      space: cs,
+                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+                  ) else { return nil }
+            return ctx.makeImage()
+        } ?? source
+
+        // Auto-crop if the ink occupies less than 70% of the canvas (e.g. a small signature scanned on an A4 sheet)
+        if minX <= maxX, minY <= maxY {
+            let inkW = maxX - minX + 1
+            let inkH = maxY - minY + 1
+            if Double(inkW * inkH) < Double(w * h) * 0.65 {
+                let padX = max(4, inkW / 18)
+                let padY = max(4, inkH / 18)
+                let cropRect = CGRect(
+                    x: max(0, minX - padX),
+                    y: max(0, minY - padY),
+                    width: min(w - max(0, minX - padX), inkW + padX * 2),
+                    height: min(h - max(0, minY - padY), inkH + padY * 2)
+                )
+                if let cropped = processedImage.cropping(to: cropRect) {
+                    return cropped
+                }
+            }
+        }
+        return processedImage
     }
 }
