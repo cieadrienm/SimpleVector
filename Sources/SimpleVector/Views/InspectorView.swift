@@ -192,11 +192,44 @@ struct InspectorView: View {
                             if case .text(var t) = item.kind {
                                 t.text = newText
                                 item.kind = .text(t)
+                                PDFCodec.updateTextFrameForEditedContent(&item)
                             }
                         }
                     }
                 }
             )
+
+            HStack(spacing: 6) {
+                Text(L("Police", "Font"))
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.textDim.swiftUI)
+                    .frame(width: 48, alignment: .leading)
+                Picker(
+                    "",
+                    selection: Binding(
+                        get: { payload.fontFamily },
+                        set: { newFam in
+                            ctrl.perform(L("Police modifiée", "Font updated")) { doc in
+                                VectorOperations.updateElement(id: el.id, onPage: ctrl.currentPageIndex, in: &doc) { item in
+                                    if case .text(var t) = item.kind {
+                                        t.fontFamily = newFam
+                                        t.postScriptFontName = nil
+                                        item.kind = .text(t)
+                                        PDFCodec.updateTextFrameForEditedContent(&item)
+                                    }
+                                }
+                            }
+                        }
+                    )
+                ) {
+                    let choices = Array(Set(["Helvetica Neue", "Arial", "Verdana", "Trebuchet MS", "Avenir Next", "Gill Sans", "Times New Roman", "Georgia", "Courier New", payload.fontFamily])).sorted()
+                    ForEach(choices, id: \.self) { fam in
+                        Text(fam).tag(fam)
+                    }
+                }
+                .labelsHidden()
+                .frame(maxWidth: .infinity)
+            }
 
             HStack(spacing: 6) {
                 Text(L("Corps", "Size"))
@@ -210,17 +243,20 @@ struct InspectorView: View {
                                 if case .text(var t) = item.kind {
                                     t.fontSize = newSize
                                     item.kind = .text(t)
+                                    PDFCodec.updateTextFrameForEditedContent(&item)
                                 }
                             }
                         }
                     ),
-                    in: 8...42
+                    in: 6...42
                 )
                 .tint(Theme.accent.swiftUI)
-                Text("\(Int(round(payload.fontSize))) pt")
+                Text(String(format: "%.1f pt", payload.fontSize))
                     .font(.system(size: 10.5, design: .monospaced))
                     .foregroundStyle(Theme.textDim.swiftUI)
-                    .frame(width: 36, alignment: .trailing)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+                    .frame(minWidth: 46, alignment: .trailing)
             }
 
             HStack(spacing: 6) {

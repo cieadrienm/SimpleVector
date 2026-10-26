@@ -81,7 +81,7 @@ enum Snapshot {
         case "shortcuts":
             png = renderOffscreenPNG(ShortcutsSheet(close: {}), size: CGSize(width: 860, height: 420))
         case "settings", "preferences":
-            png = renderOffscreenPNG(PreferencesView(model: model), size: CGSize(width: 460, height: 430))
+            png = renderOffscreenPNG(PreferencesView(model: model), size: CGSize(width: 500, height: 500))
         case "osc":
             png = renderOffscreenPNG(OSCGuideSheet(model: model, close: {}), size: CGSize(width: 720, height: 460))
         default:

@@ -220,36 +220,57 @@ public enum TextAlignmentMode: String, CaseIterable, Identifiable, Codable, Send
 public struct TextPayload: Equatable, Hashable, Codable, Sendable {
     public var text: String
     public var fontFamily: String
+    public var postScriptFontName: String?
     public var fontSize: Double
     public var isBold: Bool
     public var isItalic: Bool
     public var alignment: TextAlignmentMode
+    public var baselineOffset: Double?
+    public var letterSpacing: Double
     public var isPDFExtracted: Bool
     public var originalPDFText: String?
     public var originalPDFRect: VectorRect?
+    public var originalFontSize: Double?
+    public var originalIsBold: Bool?
+    public var originalIsItalic: Bool?
+    public var originalTextColorHex: String?
     public var maskColorHex: String
 
     public init(
         text: String,
         fontFamily: String = "Helvetica Neue",
+        postScriptFontName: String? = nil,
         fontSize: Double = 14.0,
         isBold: Bool = false,
         isItalic: Bool = false,
         alignment: TextAlignmentMode = .left,
+        baselineOffset: Double? = nil,
+        letterSpacing: Double = 0.0,
         isPDFExtracted: Bool = false,
         originalPDFText: String? = nil,
         originalPDFRect: VectorRect? = nil,
+        originalFontSize: Double? = nil,
+        originalIsBold: Bool? = nil,
+        originalIsItalic: Bool? = nil,
+        originalTextColorHex: String? = nil,
         maskColorHex: String = "#FFFFFF"
     ) {
         self.text = text
         self.fontFamily = fontFamily
-        self.fontSize = max(6.0, fontSize)
+        self.postScriptFontName = postScriptFontName
+        self.fontSize = max(5.0, fontSize)
         self.isBold = isBold
         self.isItalic = isItalic
         self.alignment = alignment
+        self.baselineOffset = baselineOffset
+        self.letterSpacing = letterSpacing
         self.isPDFExtracted = isPDFExtracted
         self.originalPDFText = originalPDFText
         self.originalPDFRect = originalPDFRect
+        self.originalFontSize = originalFontSize
+        self.originalIsBold = originalIsBold
+        self.originalIsItalic = originalIsItalic
+        self.originalTextColorHex = originalTextColorHex
         self.maskColorHex = maskColorHex
     }
 }
@@ -492,14 +513,22 @@ public struct VectorElement: Identifiable, Equatable, Hashable, Codable, Sendabl
             return true
         }
         if let origRect = t.originalPDFRect {
-            if abs(origRect.x - frame.x) > 0.5 ||
-               abs(origRect.y - frame.y) > 0.5 ||
-               abs(origRect.width - frame.width) > 1.0 ||
-               abs(origRect.height - frame.height) > 1.0 {
+            if abs(origRect.x - frame.x) > 0.75 ||
+               abs(origRect.y - frame.y) > 0.75 {
                 return true
             }
         }
-        if style.fillColorHex != nil && style.fillColorHex?.uppercased() != "#111317" {
+        if let origSize = t.originalFontSize, abs(origSize - t.fontSize) > 0.25 {
+            return true
+        }
+        if let origBold = t.originalIsBold, origBold != t.isBold {
+            return true
+        }
+        if let origItalic = t.originalIsItalic, origItalic != t.isItalic {
+            return true
+        }
+        let expectedColor = (t.originalTextColorHex ?? "#111317").uppercased()
+        if let curColor = style.fillColorHex?.uppercased(), curColor != expectedColor {
             return true
         }
         return false
@@ -594,12 +623,12 @@ public struct VectorPage: Identifiable, Equatable, Codable, Sendable {
 
     /// Returns all PDF rectangles that must be masked out because their extracted text was edited, moved, or deleted.
     public var activeMaskRects: [(rect: VectorRect, colorHex: String)] {
-        var result: [(VectorRect, String)] = redactedPDFRects.map { ($0.insetBy(dx: -1.5, dy: -1.0), backgroundColorHex) }
+        var result: [(VectorRect, String)] = redactedPDFRects.map { ($0.insetBy(dx: -0.6, dy: -0.5), backgroundColorHex) }
         for el in elements {
             if case .text(let payload) = el.kind, payload.isPDFExtracted {
                 if el.hasModifiedPDFText || !el.visible {
                     if let orig = payload.originalPDFRect {
-                        result.append((orig.insetBy(dx: -1.5, dy: -1.0), payload.maskColorHex))
+                        result.append((orig.insetBy(dx: -0.6, dy: -0.5), payload.maskColorHex))
                     }
                 }
             }

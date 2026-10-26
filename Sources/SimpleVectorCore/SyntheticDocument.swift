@@ -24,6 +24,7 @@ public enum SyntheticDocument {
                         t.isBold = true
                         doc.pages[0].elements[statusIdx].kind = .text(t)
                         doc.pages[0].elements[statusIdx].style.fillColorHex = "#0F766E"
+                        PDFCodec.updateTextFrameForEditedContent(&doc.pages[0].elements[statusIdx])
                     }
                 }
 

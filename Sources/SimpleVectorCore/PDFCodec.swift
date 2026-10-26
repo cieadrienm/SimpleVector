@@ -30,7 +30,12 @@ public enum PDFCodec {
                 singleDoc.insert(pageCopy, at: 0)
             }
             let singlePageData = singleDoc.dataRepresentation()
-            let extractedElements = extractEditableTextElements(from: pdfPage, pageWidth: w, pageHeight: h)
+            let extractedElements = extractEditableTextElements(
+                from: pdfPage,
+                singlePageData: singlePageData,
+                pageWidth: w,
+                pageHeight: h
+            )
 
             let page = VectorPage(
                 title: "Page \(i + 1)",
@@ -53,18 +58,28 @@ public enum PDFCodec {
         )
     }
 
-    /// Extracts editable text lines from a `PDFPage`, converting PDF bottom-left bounds into top-left `VectorRect`.
+    /// Extracts editable text lines from a `PDFPage`, splitting multi-column lines and measuring exact font,
+    /// baseline, text color, tight glyph bounds, and background mask color.
     public static func extractEditableTextElements(
         from pdfPage: PDFPage,
+        singlePageData: Data? = nil,
         pageWidth: Double,
         pageHeight: Double
     ) -> [VectorElement] {
         guard let fullString = pdfPage.string, !fullString.isEmpty else { return [] }
         let nsString = fullString as NSString
         let mediaBox = pdfPage.bounds(for: .mediaBox)
-        var elements: [VectorElement] = []
 
+        let bitmapAnalyzer = PDFPageBitmapAnalyzer(
+            pdfPage: pdfPage,
+            singlePageData: singlePageData,
+            pageWidth: pageWidth,
+            pageHeight: pageHeight
+        )
+
+        var elements: [VectorElement] = []
         var index = 0
+
         while index < nsString.length {
             let lineRange = nsString.lineRange(for: NSRange(location: index, length: 0))
             defer { index = NSMaxRange(lineRange) }
@@ -73,60 +88,448 @@ public enum PDFCodec {
             let trimmed = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { continue }
 
-            // Compute exact character range of the trimmed text inside lineRange
             let subRange = (rawLine as NSString).range(of: trimmed)
             let exactRange = subRange.location != NSNotFound
                 ? NSRange(location: lineRange.location + subRange.location, length: subRange.length)
                 : lineRange
 
-            guard let sel = pdfPage.selection(for: exactRange) else { continue }
-            let lineSelections = sel.selectionsByLine()
-            let targets = lineSelections.isEmpty ? [sel] : lineSelections
+            let columnRanges = splitIntoColumnRanges(in: pdfPage, fullString: nsString, range: exactRange)
+            for colRange in columnRanges {
+                guard let sel = pdfPage.selection(for: colRange) else { continue }
+                let lineSelections = sel.selectionsByLine()
+                let targets = lineSelections.isEmpty ? [sel] : lineSelections
 
-            for lineSel in targets {
-                let text = (lineSel.string ?? trimmed).trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !text.isEmpty else { continue }
-                let pdfBounds = lineSel.bounds(for: pdfPage)
-                guard pdfBounds.width > 1.5, pdfBounds.height > 2.0,
-                      pdfBounds.width.isFinite, pdfBounds.height.isFinite else { continue }
-
-                let relX = Double(pdfBounds.minX - mediaBox.minX)
-                let relYFromBottom = Double(pdfBounds.maxY - mediaBox.minY)
-                let topDownY = max(0.0, pageHeight - relYFromBottom)
-                let rectW = max(24.0, Double(pdfBounds.width) + 4.0)
-                let rectH = max(10.0, Double(pdfBounds.height) + 2.0)
-
-                let estimatedFontSize = max(8.0, min(36.0, round(Double(pdfBounds.height) * 0.78)))
-                let isLikelyHeader = estimatedFontSize >= 15.0
-
-                let frameRect = VectorRect(
-                    x: max(0, relX),
-                    y: max(0, topDownY),
-                    width: rectW,
-                    height: rectH
-                )
-
-                let element = VectorElement(
-                    name: String(text.prefix(32)),
-                    kind: .text(TextPayload(
-                        text: text,
-                        fontFamily: "Helvetica Neue",
-                        fontSize: estimatedFontSize,
-                        isBold: isLikelyHeader,
-                        isItalic: false,
-                        alignment: .left,
-                        isPDFExtracted: true,
-                        originalPDFText: text,
-                        originalPDFRect: frameRect,
-                        maskColorHex: "#FFFFFF"
-                    )),
-                    frame: frameRect,
-                    style: VectorStyle(strokeColorHex: nil, fillColorHex: "#111317", strokeWidth: 0, opacity: 1.0)
-                )
-                elements.append(element)
+                for lineSel in targets {
+                    guard let element = buildExtractedTextElement(
+                        from: lineSel,
+                        in: pdfPage,
+                        mediaBox: mediaBox,
+                        pageWidth: pageWidth,
+                        pageHeight: pageHeight,
+                        bitmapAnalyzer: bitmapAnalyzer
+                    ) else { continue }
+                    elements.append(element)
+                }
             }
         }
         return elements
+    }
+
+    /// Splits a line range into separate column ranges whenever consecutive words have a large horizontal gap
+    /// (e.g., left-column reference and right-column date on the same horizontal row).
+    private static func splitIntoColumnRanges(
+        in pdfPage: PDFPage,
+        fullString: NSString,
+        range: NSRange
+    ) -> [NSRange] {
+        var wordRanges: [(NSRange, CGRect)] = []
+        fullString.enumerateSubstrings(
+            in: range,
+            options: [.byWords, .substringNotRequired]
+        ) { _, wordRange, _, _ in
+            if let wordSel = pdfPage.selection(for: wordRange) {
+                let b = wordSel.bounds(for: pdfPage)
+                if b.width > 0.5 && b.height > 1.0 && b.width.isFinite && b.height.isFinite {
+                    wordRanges.append((wordRange, b))
+                }
+            }
+        }
+
+        guard wordRanges.count >= 2 else { return [range] }
+
+        var groups: [NSRange] = []
+        var currentStart = range.location
+        var prevBounds = wordRanges[0].1
+
+        for i in 1..<wordRanges.count {
+            let (wRange, wBounds) = wordRanges[i]
+            let refH = max(8.0, min(prevBounds.height, wBounds.height))
+            let horizGap = wBounds.minX - prevBounds.maxX
+            let vertDiff = abs(wBounds.midY - prevBounds.midY)
+
+            // Also check if the substring between the two words contains 2+ spaces or a tab
+            let betweenStart = NSMaxRange(wordRanges[i - 1].0)
+            let betweenLen = max(0, wRange.location - betweenStart)
+            let betweenStr = betweenLen > 0 ? fullString.substring(with: NSRange(location: betweenStart, length: betweenLen)) : ""
+            let hasMultiSpace = betweenStr.contains("\t") || betweenStr.contains("   ")
+
+            if horizGap > max(18.0, refH * 1.65) || (hasMultiSpace && horizGap > max(10.0, refH * 0.9)) || vertDiff > refH * 0.65 {
+                let groupEnd = NSMaxRange(wordRanges[i - 1].0)
+                if groupEnd > currentStart {
+                    groups.append(NSRange(location: currentStart, length: groupEnd - currentStart))
+                }
+                currentStart = wRange.location
+            }
+            prevBounds = wBounds
+        }
+
+        let finalEnd = NSMaxRange(range)
+        if finalEnd > currentStart {
+            groups.append(NSRange(location: currentStart, length: finalEnd - currentStart))
+        }
+        return groups.isEmpty ? [range] : groups
+    }
+
+    private static func buildExtractedTextElement(
+        from lineSel: PDFSelection,
+        in pdfPage: PDFPage,
+        mediaBox: CGRect,
+        pageWidth: Double,
+        pageHeight: Double,
+        bitmapAnalyzer: PDFPageBitmapAnalyzer?
+    ) -> VectorElement? {
+        let rawText = (lineSel.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !rawText.isEmpty else { return nil }
+
+        let pdfBounds = lineSel.bounds(for: pdfPage)
+        guard pdfBounds.width > 1.5, pdfBounds.height > 2.0,
+              pdfBounds.width.isFinite, pdfBounds.height.isFinite else { return nil }
+
+        // 1. Convert PDF bottom-left selection box to top-left page coordinates
+        let selX = max(0.0, Double(pdfBounds.minX - mediaBox.minX))
+        let selTopY = max(0.0, pageHeight - Double(pdfBounds.maxY - mediaBox.minY))
+        let selW = Double(pdfBounds.width)
+        let selH = Double(pdfBounds.height)
+        let selectionRect = VectorRect(x: selX, y: selTopY, width: selW, height: selH)
+
+        // 2. Extract font & color attributes from PDFSelection.attributedString
+        let attrInfo = extractAttributedFontAndColor(from: lineSel, fallbackHeight: selH)
+
+        // 3. Analyze the rendered PDF bitmap inside selectionRect for exact background color, ink color,
+        //    tight glyph bounding box, and sub-point baseline position
+        let bitmapMetrics = bitmapAnalyzer?.analyzeTextRegion(selectionRect: selectionRect, text: rawText)
+
+        let maskColorHex = bitmapMetrics?.maskColorHex ?? "#FFFFFF"
+        let textColorHex = bitmapMetrics?.inkColorHex ?? attrInfo.colorHex ?? "#111317"
+        let tightFrame = bitmapMetrics?.tightInkRect ?? selectionRect
+
+        // 4. Keep exact PDF font size when attributedString provides it; otherwise calibrate from measured cap-height
+        var fontSize = attrInfo.fontSize
+        let tempPayload = TextPayload(
+            text: rawText,
+            fontFamily: attrInfo.fontFamily,
+            postScriptFontName: attrInfo.postScriptName,
+            fontSize: fontSize,
+            isBold: attrInfo.isBold,
+            isItalic: attrInfo.isItalic
+        )
+
+        if !attrInfo.hadExplicitFont, let metrics = bitmapMetrics, metrics.hasReliableCapHeight {
+            let unitFont = resolveCTFont(for: tempPayload, size: 100.0)
+            let capRatio = Double(CTFontGetCapHeight(unitFont)) / 100.0
+            if capRatio > 0.35 {
+                let capMatchedSize = (metrics.measuredCapHeight - 0.35) / capRatio
+                fontSize = max(5.5, min(72.0, capMatchedSize))
+            }
+        }
+
+        // 5. Compute baseline offset from tightFrame.minY
+        let resolvedFont = resolveCTFont(
+            for: TextPayload(
+                text: rawText,
+                fontFamily: attrInfo.fontFamily,
+                postScriptFontName: attrInfo.postScriptName,
+                fontSize: fontSize,
+                isBold: attrInfo.isBold,
+                isItalic: attrInfo.isItalic
+            ),
+            size: CGFloat(fontSize)
+        )
+        let capH = Double(CTFontGetCapHeight(resolvedFont))
+        let baselineOffset: Double
+        if let metrics = bitmapMetrics {
+            baselineOffset = max(capH * 0.88, min(tightFrame.height + 1.0, metrics.baselineY - tightFrame.y - 0.30))
+        } else {
+            baselineOffset = capH
+        }
+
+        // 6. Compute subtle letter-spacing only if the PDF font was substituted by a fallback font
+        var letterSpacing = 0.0
+        let resolvedPS = (CTFontCopyPostScriptName(resolvedFont) as String).lowercased()
+        let wasSubstituted: Bool
+        if let reqPS = attrInfo.postScriptName?.lowercased(), !reqPS.isEmpty {
+            wasSubstituted = !resolvedPS.hasPrefix(reqPS.prefix(5))
+        } else {
+            wasSubstituted = true
+        }
+        let charCount = rawText.count
+        if wasSubstituted, charCount >= 4, let metrics = bitmapMetrics, metrics.tightInkRect.width > 12.0 {
+            let unkernedWidth = measureSingleLineWidth(rawText, ctFont: resolvedFont, kern: 0.0)
+            if unkernedWidth > 4.0 {
+                let targetWidth = max(4.0, metrics.tightInkRect.width - 0.7)
+                let delta = targetWidth - unkernedWidth
+                let perGap = delta / Double(charCount - 1)
+                if abs(perGap) <= 0.40 {
+                    letterSpacing = perGap
+                }
+            }
+        }
+
+        let payload = TextPayload(
+            text: rawText,
+            fontFamily: attrInfo.fontFamily,
+            postScriptFontName: attrInfo.postScriptName,
+            fontSize: fontSize,
+            isBold: attrInfo.isBold,
+            isItalic: attrInfo.isItalic,
+            alignment: .left,
+            baselineOffset: baselineOffset,
+            letterSpacing: letterSpacing,
+            isPDFExtracted: true,
+            originalPDFText: rawText,
+            originalPDFRect: tightFrame,
+            originalFontSize: fontSize,
+            originalIsBold: attrInfo.isBold,
+            originalIsItalic: attrInfo.isItalic,
+            originalTextColorHex: textColorHex,
+            maskColorHex: maskColorHex
+        )
+
+        return VectorElement(
+            name: String(rawText.prefix(32)),
+            kind: .text(payload),
+            frame: tightFrame,
+            style: VectorStyle(strokeColorHex: nil, fillColorHex: textColorHex, strokeWidth: 0, opacity: 1.0)
+        )
+    }
+
+    // MARK: - Font & Color Attribute Extraction from `PDFSelection`
+
+    private struct ExtractedFontAttributes {
+        var fontFamily: String
+        var postScriptName: String?
+        var fontSize: Double
+        var isBold: Bool
+        var isItalic: Bool
+        var colorHex: String?
+        var hadExplicitFont: Bool
+    }
+
+    private static func extractAttributedFontAndColor(
+        from selection: PDFSelection,
+        fallbackHeight: Double
+    ) -> ExtractedFontAttributes {
+        var result = ExtractedFontAttributes(
+            fontFamily: "Helvetica Neue",
+            postScriptName: nil,
+            fontSize: max(7.0, min(42.0, fallbackHeight * 0.74)),
+            isBold: false,
+            isItalic: false,
+            colorHex: nil,
+            hadExplicitFont: false
+        )
+
+        guard let attrStr = selection.attributedString, attrStr.length > 0 else {
+            return result
+        }
+
+        let str = attrStr.string as NSString
+        var probeIdx = 0
+        for i in 0..<str.length {
+            let ch = str.character(at: i)
+            if ch != 32 && ch != 9 && ch != 10 && ch != 13 {
+                probeIdx = i
+                break
+            }
+        }
+
+        let attrs = attrStr.attributes(at: probeIdx, effectiveRange: nil)
+
+        // Extract CTFont (toll-free bridged with NSFont)
+        let fontObj = attrs[NSAttributedString.Key("NSFont")] ?? attrs[kCTFontAttributeName as NSAttributedString.Key]
+        if let fontObj {
+            let cfRef = fontObj as CFTypeRef
+            if CFGetTypeID(cfRef) == CTFontGetTypeID() {
+                let ctFont = unsafeBitCast(cfRef, to: CTFont.self)
+                let rawPS = stripPDFSubsetPrefix(CTFontCopyPostScriptName(ctFont) as String)
+                let rawFam = stripPDFSubsetPrefix(CTFontCopyFamilyName(ctFont) as String)
+                let ptSize = Double(CTFontGetSize(ctFont))
+                let traits = CTFontGetSymbolicTraits(ctFont)
+
+                let lowerPS = rawPS.lowercased()
+                let isBold = traits.contains(.boldTrait)
+                    || lowerPS.contains("bold")
+                    || lowerPS.contains("-bd")
+                    || lowerPS.contains("semibold")
+                    || lowerPS.contains("demi")
+                    || lowerPS.contains("heavy")
+                    || lowerPS.contains("black")
+                    || lowerPS.contains("medium")
+                let isItalic = traits.contains(.italicTrait)
+                    || lowerPS.contains("italic")
+                    || lowerPS.contains("oblique")
+                    || lowerPS.contains("-it")
+
+                result.postScriptName = rawPS.isEmpty ? nil : rawPS
+                result.fontFamily = normalizeFontFamilyName(family: rawFam, postScript: rawPS)
+                if ptSize >= 4.5 && ptSize <= 96.0 {
+                    result.fontSize = ptSize
+                    result.hadExplicitFont = true
+                }
+                result.isBold = isBold
+                result.isItalic = isItalic
+            }
+        }
+
+        // Extract foreground color if available as CGColor
+        let colorObj = attrs[NSAttributedString.Key("NSColor")] ?? attrs[kCTForegroundColorAttributeName as NSAttributedString.Key]
+        if let colorObj {
+            let cfRef = colorObj as CFTypeRef
+            if CFGetTypeID(cfRef) == CGColor.typeID {
+                let cgColor = unsafeBitCast(cfRef, to: CGColor.self)
+                if let hex = hexFromCGColor(cgColor) {
+                    result.colorHex = hex
+                }
+            } else if let nsObj = colorObj as? NSObject,
+                      nsObj.responds(to: Selector(("CGColor"))),
+                      let unmanaged = nsObj.perform(Selector(("CGColor"))) {
+                let cgColor = unsafeBitCast(unmanaged.toOpaque(), to: CGColor.self)
+                if let hex = hexFromCGColor(cgColor) {
+                    result.colorHex = hex
+                }
+            }
+        }
+
+        return result
+    }
+
+    private static func stripPDFSubsetPrefix(_ name: String) -> String {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count > 7 else { return trimmed }
+        let plusIndex = trimmed.index(trimmed.startIndex, offsetBy: 6)
+        if trimmed[plusIndex] == "+" {
+            let prefix = trimmed[..<plusIndex]
+            if prefix.allSatisfy({ $0 >= "A" && $0 <= "Z" }) {
+                return String(trimmed[trimmed.index(after: plusIndex)...])
+            }
+        }
+        return trimmed
+    }
+
+    private static func normalizeFontFamilyName(family: String, postScript: String) -> String {
+        let candidate = family.isEmpty ? postScript : family
+        let lower = candidate.lowercased()
+        if lower.contains("arial") || lower.contains("liberation sans") || lower.contains("liberationsans") || lower.contains("arimo") {
+            return "Arial"
+        }
+        if lower.contains("verdana") || lower.contains("dejavu sans") || lower.contains("dejavusans") || lower.contains("tahoma") {
+            return "Verdana"
+        }
+        if lower.contains("trebuchet") {
+            return "Trebuchet MS"
+        }
+        if lower.contains("calibri") || lower.contains("carlito") || lower.contains("candara") || lower.contains("segoe") || lower.contains("marianne") || lower.contains("ubuntu") || lower.contains("roboto") || lower.contains("open sans") || lower.contains("opensans") || lower.contains("source sans") || lower.contains("sourcesans") || lower.contains("lato") || lower.contains("noto sans") {
+            return "Helvetica Neue"
+        }
+        if lower.contains("times") || lower.contains("liberation serif") || lower.contains("tinos") || lower.contains("nimbus roman") {
+            return "Times New Roman"
+        }
+        if lower.contains("georgia") || lower.contains("cambria") || lower.contains("merriweather") {
+            return "Georgia"
+        }
+        if lower.contains("courier") || lower.contains("consolas") || lower.contains("menlo") || lower.contains("mono") {
+            return "Courier New"
+        }
+        if lower.contains("avenir") {
+            return "Avenir Next"
+        }
+        if lower.contains("gill") {
+            return "Gill Sans"
+        }
+        if lower.contains("helvetica") {
+            return "Helvetica Neue"
+        }
+        return candidate.isEmpty ? "Helvetica Neue" : candidate
+    }
+
+    private static func hexFromCGColor(_ cgColor: CGColor) -> String? {
+        guard let srgb = CGColorSpace(name: CGColorSpace.sRGB),
+              let converted = cgColor.converted(to: srgb, intent: .defaultIntent, options: nil),
+              let comps = converted.components, comps.count >= 3 else {
+            return nil
+        }
+        return RGBAColor(r: Double(comps[0]), g: Double(comps[1]), b: Double(comps[2])).hexString
+    }
+
+    // MARK: - Unified Font Resolver & Metrics (`PDFCodec` + `CanvasViewportView`)
+
+    /// Resolves the exact `CTFont` for a `TextPayload` at a requested point size, preserving PDF PostScript names,
+    /// font families, and bold/italic symbolic traits.
+    public static func resolveCTFont(for payload: TextPayload, size: CGFloat) -> CTFont {
+        let clampedSize = max(4.0, size)
+        var requestedTraits: CTFontSymbolicTraits = []
+        if payload.isBold { requestedTraits.insert(.boldTrait) }
+        if payload.isItalic { requestedTraits.insert(.italicTrait) }
+
+        // 1. If we have an explicit PostScript name and traits match its original state, try loading it directly
+        if let psName = payload.postScriptFontName, !psName.isEmpty,
+           payload.isBold == (payload.originalIsBold ?? payload.isBold),
+           payload.isItalic == (payload.originalIsItalic ?? payload.isItalic) {
+            let direct = CTFontCreateWithName(psName as CFString, clampedSize, nil)
+            let actualPS = (CTFontCopyPostScriptName(direct) as String).lowercased()
+            let reqLower = psName.lowercased()
+            if actualPS == reqLower || actualPS.hasPrefix(reqLower.prefix(5)) {
+                return direct
+            }
+        }
+
+        // 2. Create from family name and apply requested bold/italic symbolic traits
+        let family = payload.fontFamily.isEmpty ? "Helvetica Neue" : payload.fontFamily
+        let baseFont = CTFontCreateWithName(family as CFString, clampedSize, nil)
+        if !requestedTraits.isEmpty,
+           let traited = CTFontCreateCopyWithSymbolicTraits(baseFont, clampedSize, nil, requestedTraits, [.boldTrait, .italicTrait]) {
+            return traited
+        }
+
+        // 3. Explicit PostScript fallback for Helvetica Neue
+        let fallbackName: String
+        if payload.isBold && payload.isItalic {
+            fallbackName = "HelveticaNeue-BoldItalic"
+        } else if payload.isBold {
+            fallbackName = "HelveticaNeue-Bold"
+        } else if payload.isItalic {
+            fallbackName = "HelveticaNeue-Italic"
+        } else {
+            fallbackName = "HelveticaNeue"
+        }
+        return CTFontCreateWithName(fallbackName as CFString, clampedSize, nil)
+    }
+
+    public static func measureTextWidth(for payload: TextPayload) -> Double {
+        let ctFont = resolveCTFont(for: payload, size: CGFloat(payload.fontSize))
+        let lines = payload.text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        var maxW = 12.0
+        for line in lines {
+            let w = measureSingleLineWidth(line, ctFont: ctFont, kern: payload.letterSpacing)
+            if w > maxW { maxW = w }
+        }
+        return maxW
+    }
+
+    /// Updates `element.frame.width` (and `height` for multi-line edits) to match the edited text while keeping
+    /// `originalPDFRect` untouched so only the original PDF glyphs are masked.
+    public static func updateTextFrameForEditedContent(_ element: inout VectorElement) {
+        guard case .text(let payload) = element.kind else { return }
+        let measuredW = measureTextWidth(for: payload)
+        element.frame.width = max(14.0, measuredW + 2.0)
+        let lineCount = max(1, payload.text.split(separator: "\n", omittingEmptySubsequences: false).count)
+        if lineCount > 1 {
+            element.frame.height = max(element.frame.height, Double(lineCount) * payload.fontSize * 1.25)
+        }
+    }
+
+    private static func measureSingleLineWidth(_ string: String, ctFont: CTFont, kern: Double) -> Double {
+        guard !string.isEmpty else { return 0 }
+        let kernNumber = kern as CFNumber
+        let attrs: [CFString: Any] = [
+            kCTFontAttributeName: ctFont,
+            kCTKernAttributeName: kernNumber,
+        ]
+        guard let attrStr = CFAttributedStringCreate(kCFAllocatorDefault, string as CFString, attrs as CFDictionary) else {
+            return Double(string.count) * Double(CTFontGetSize(ctFont)) * 0.55
+        }
+        let ctLine = CTLineCreateWithAttributedString(attrStr)
+        return Double(CTLineGetTypographicBounds(ctLine, nil, nil, nil))
     }
 
     // MARK: - Export Multi-Page Vector PDF
@@ -187,7 +590,6 @@ public enum PDFCodec {
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
         ) else { return nil }
 
-        // Flip bitmap context so (0, 0) is top-left
         ctx.translateBy(x: 0, y: CGFloat(pixelH))
         ctx.scaleBy(x: CGFloat(scale), y: -CGFloat(scale))
         renderPage(page, in: ctx)
@@ -228,7 +630,7 @@ public enum PDFCodec {
             ctx.restoreGState()
         }
 
-        // 2. Mask out edited, moved, or deleted PDF text blocks
+        // 2. Mask out edited, moved, or deleted PDF text blocks using their sampled background color
         for mask in page.activeMaskRects {
             let maskColor = RGBAColor(hex: mask.colorHex) ?? bg
             ctx.setFillColor(maskColor.cgColor)
@@ -241,7 +643,6 @@ public enum PDFCodec {
                t.isPDFExtracted,
                !element.hasModifiedPDFText,
                page.pdfPageData != nil {
-                // Unmodified PDF text is already rendered by the native PDF page stream above
                 continue
             }
             renderElement(element, in: ctx)
@@ -385,11 +786,12 @@ public enum PDFCodec {
             }
             let meta = [sig.signerName, sig.caption, sig.dateLabel].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
             if !meta.isEmpty {
+                let metaFont = CTFontCreateWithName("HelveticaNeue" as CFString, 8.5, nil)
                 drawCoreTextLine(
                     meta,
                     at: CGPoint(x: f.minX + 2, y: f.maxY - 2),
-                    fontName: "HelveticaNeue",
-                    fontSize: 8.5,
+                    ctFont: metaFont,
+                    kern: 0.0,
                     color: ink.cgColor,
                     alignment: .left,
                     boxWidth: f.width - 4,
@@ -399,25 +801,17 @@ public enum PDFCodec {
 
         case .text(let t):
             let color = (fillColor ?? strokeColor ?? RGBAColor(r: 0.07, g: 0.07, b: 0.09)).cgColor
-            let fontName: String
-            if t.isBold && t.isItalic {
-                fontName = "HelveticaNeue-BoldItalic"
-            } else if t.isBold {
-                fontName = "HelveticaNeue-Bold"
-            } else if t.isItalic {
-                fontName = "HelveticaNeue-Italic"
-            } else {
-                fontName = "HelveticaNeue"
-            }
+            let ctFont = resolveCTFont(for: t, size: CGFloat(t.fontSize))
             let lines = t.text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-            let lineH = t.fontSize * 1.28
+            let lineH = t.fontSize * 1.25
+            let firstBaselineOffset = t.baselineOffset ?? Double(CTFontGetCapHeight(ctFont))
             for (idx, line) in lines.enumerated() {
-                let baselineY = f.minY + t.fontSize * 0.88 + Double(idx) * lineH
+                let baselineY = f.minY + firstBaselineOffset + Double(idx) * lineH
                 drawCoreTextLine(
                     line,
                     at: CGPoint(x: f.minX, y: baselineY),
-                    fontName: fontName,
-                    fontSize: t.fontSize,
+                    ctFont: ctFont,
+                    kern: t.letterSpacing,
                     color: color,
                     alignment: t.alignment,
                     boxWidth: f.width,
@@ -444,22 +838,24 @@ public enum PDFCodec {
                 ctx.strokePath()
             }
 
+            let titleFont = CTFontCreateWithName("HelveticaNeue-Bold" as CFString, CGFloat(min(14.0, f.height * 0.30)), nil)
             drawCoreTextLine(
                 st.title,
                 at: CGPoint(x: f.minX, y: f.minY + f.height * 0.52),
-                fontName: "HelveticaNeue-Bold",
-                fontSize: min(14.0, f.height * 0.30),
+                ctFont: titleFont,
+                kern: 0.0,
                 color: color.cgColor,
                 alignment: .center,
                 boxWidth: f.width,
                 in: ctx
             )
             if !st.subtitle.isEmpty {
+                let subFont = CTFontCreateWithName("HelveticaNeue" as CFString, CGFloat(min(9.0, f.height * 0.18)), nil)
                 drawCoreTextLine(
                     st.subtitle,
                     at: CGPoint(x: f.minX, y: f.minY + f.height * 0.80),
-                    fontName: "HelveticaNeue",
-                    fontSize: min(9.0, f.height * 0.18),
+                    ctFont: subFont,
+                    kern: 0.0,
                     color: color.cgColor,
                     alignment: .center,
                     boxWidth: f.width,
@@ -487,18 +883,19 @@ public enum PDFCodec {
     private static func drawCoreTextLine(
         _ string: String,
         at origin: CGPoint,
-        fontName: String,
-        fontSize: Double,
+        ctFont: CTFont,
+        kern: Double,
         color: CGColor,
         alignment: TextAlignmentMode,
         boxWidth: Double,
         in ctx: CGContext
     ) {
         guard !string.isEmpty else { return }
-        let ctFont = CTFontCreateWithName(fontName as CFString, CGFloat(fontSize), nil)
+        let kernNumber = kern as CFNumber
         let attrs: [CFString: Any] = [
             kCTFontAttributeName: ctFont,
             kCTForegroundColorAttributeName: color,
+            kCTKernAttributeName: kernNumber,
         ]
         guard let attrStr = CFAttributedStringCreate(kCFAllocatorDefault, string as CFString, attrs as CFDictionary) else { return }
         let ctLine = CTLineCreateWithAttributedString(attrStr)
@@ -515,12 +912,251 @@ public enum PDFCodec {
         }
 
         ctx.saveGState()
-        // CoreText draws upright in bottom-up space; flip locally around the baseline point
         ctx.translateBy(x: drawX, y: origin.y)
         ctx.scaleBy(x: 1, y: -1)
         ctx.textMatrix = .identity
         ctx.textPosition = .zero
         CTLineDraw(ctLine, ctx)
         ctx.restoreGState()
+    }
+}
+
+// MARK: - 2x sRGB Page Bitmap Analyzer (Exact Background Color, Ink Bounds & Baseline)
+
+private final class PDFPageBitmapAnalyzer {
+    let scale: Double = 2.0
+    let pixelW: Int
+    let pixelH: Int
+    let bytesPerRow: Int
+    let buffer: [UInt8]
+
+    struct RegionMetrics {
+        let maskColorHex: String
+        let inkColorHex: String?
+        let tightInkRect: VectorRect
+        let baselineY: Double
+        let measuredCapHeight: Double
+        let hasReliableCapHeight: Bool
+    }
+
+    init?(pdfPage: PDFPage, singlePageData: Data?, pageWidth: Double, pageHeight: Double) {
+        let s: Double = 2.0
+        let pw = max(16, Int(round(pageWidth * s)))
+        let ph = max(16, Int(round(pageHeight * s)))
+        let bpr = pw * 4
+        var raw = [UInt8](repeating: 255, count: ph * bpr)
+
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
+        let ok = raw.withUnsafeMutableBytes { ptr -> Bool in
+            guard let base = ptr.baseAddress,
+                  let ctx = CGContext(
+                      data: base,
+                      width: pw,
+                      height: ph,
+                      bitsPerComponent: 8,
+                      bytesPerRow: bpr,
+                      space: colorSpace,
+                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+                  ) else { return false }
+
+            ctx.setFillColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1))
+            ctx.fill(CGRect(x: 0, y: 0, width: pw, height: ph))
+
+            if let data = singlePageData,
+               let provider = CGDataProvider(data: data as CFData),
+               let cgPDF = CGPDFDocument(provider),
+               let cgPage = cgPDF.page(at: 1) {
+                let mediaBox = cgPage.getBoxRect(.mediaBox)
+                ctx.scaleBy(
+                    x: CGFloat(pw) / max(1, mediaBox.width),
+                    y: CGFloat(ph) / max(1, mediaBox.height)
+                )
+                ctx.translateBy(x: -mediaBox.minX, y: -mediaBox.minY)
+                ctx.drawPDFPage(cgPage)
+                return true
+            } else if let cgPage = pdfPage.pageRef {
+                let mediaBox = cgPage.getBoxRect(.mediaBox)
+                ctx.scaleBy(
+                    x: CGFloat(pw) / max(1, mediaBox.width),
+                    y: CGFloat(ph) / max(1, mediaBox.height)
+                )
+                ctx.translateBy(x: -mediaBox.minX, y: -mediaBox.minY)
+                ctx.drawPDFPage(cgPage)
+                return true
+            }
+            return false
+        }
+        guard ok else { return nil }
+        self.pixelW = pw
+        self.pixelH = ph
+        self.bytesPerRow = bpr
+        self.buffer = raw
+    }
+
+    func analyzeTextRegion(selectionRect: VectorRect, text: String) -> RegionMetrics {
+        let px0 = max(0, min(pixelW - 1, Int(floor(selectionRect.minX * scale))))
+        let px1 = max(px0, min(pixelW - 1, Int(ceil(selectionRect.maxX * scale))))
+        let py0 = max(0, min(pixelH - 1, Int(floor(selectionRect.minY * scale))))
+        let py1 = max(py0, min(pixelH - 1, Int(ceil(selectionRect.maxY * scale))))
+
+        // 1. Sample background color from pixels inside selectionRect (75th percentile by luminance)
+        var samples: [(luma: Int, r: Int, g: Int, b: Int)] = []
+        let stepX = max(1, (px1 - px0) / 48)
+        let stepY = max(1, (py1 - py0) / 16)
+        for py in stride(from: py0, through: py1, by: stepY) {
+            let rowOffset = py * bytesPerRow
+            for px in stride(from: px0, through: px1, by: stepX) {
+                let idx = rowOffset + px * 4
+                let r = Int(buffer[idx])
+                let g = Int(buffer[idx + 1])
+                let b = Int(buffer[idx + 2])
+                let luma = (299 * r + 587 * g + 114 * b) / 1000
+                samples.append((luma, r, g, b))
+            }
+        }
+
+        samples.sort { $0.luma < $1.luma }
+        let bgSample: (luma: Int, r: Int, g: Int, b: Int)
+        if samples.isEmpty {
+            bgSample = (255, 255, 255, 255)
+        } else {
+            let highIdx = min(samples.count - 1, (samples.count * 78) / 100)
+            let lowIdx = min(samples.count - 1, (samples.count * 22) / 100)
+            let medianIdx = samples.count / 2
+            // If majority of box is dark (< 110), background is dark; otherwise background is the upper quartile
+            bgSample = samples[medianIdx].luma < 110 ? samples[lowIdx] : samples[highIdx]
+        }
+
+        let maskColorHex = String(format: "#%02X%02X%02X", bgSample.r, bgSample.g, bgSample.b)
+
+        // 2. Scan for glyph ink pixels inside selectionRect that contrast with bgSample
+        var minInkX = Int.max
+        var maxInkX = Int.min
+        var minInkY = Int.max
+        var maxInkY = Int.min
+
+        let colCount = max(1, px1 - px0 + 1)
+        var colMinY = [Int](repeating: Int.max, count: colCount)
+        var colMaxY = [Int](repeating: Int.min, count: colCount)
+        var inkSamples: [(dist: Int, r: Int, g: Int, b: Int)] = []
+
+        for py in py0...py1 {
+            let rowOffset = py * bytesPerRow
+            for px in px0...px1 {
+                let idx = rowOffset + px * 4
+                let r = Int(buffer[idx])
+                let g = Int(buffer[idx + 1])
+                let b = Int(buffer[idx + 2])
+                let dist = max(abs(r - bgSample.r), max(abs(g - bgSample.g), abs(b - bgSample.b)))
+                if dist >= 26 {
+                    if px < minInkX { minInkX = px }
+                    if px > maxInkX { maxInkX = px }
+                    if py < minInkY { minInkY = py }
+                    if py > maxInkY { maxInkY = py }
+                    let cIdx = px - px0
+                    if py < colMinY[cIdx] { colMinY[cIdx] = py }
+                    if py > colMaxY[cIdx] { colMaxY[cIdx] = py }
+                    if dist >= 55 {
+                        inkSamples.append((dist, r, g, b))
+                    }
+                }
+            }
+        }
+
+        guard minInkX <= maxInkX, minInkY <= maxInkY else {
+            return RegionMetrics(
+                maskColorHex: maskColorHex,
+                inkColorHex: nil,
+                tightInkRect: selectionRect,
+                baselineY: selectionRect.minY + selectionRect.height * 0.80,
+                measuredCapHeight: selectionRect.height * 0.65,
+                hasReliableCapHeight: false
+            )
+        }
+
+        // 3. Determine dominant ink color from the highest-contrast core glyph pixels
+        var inkColorHex: String? = nil
+        if !inkSamples.isEmpty {
+            inkSamples.sort { $0.dist > $1.dist }
+            let coreCount = max(1, min(inkSamples.count, inkSamples.count / 4))
+            var sumR = 0, sumG = 0, sumB = 0
+            for i in 0..<coreCount {
+                sumR += inkSamples[i].r
+                sumG += inkSamples[i].g
+                sumB += inkSamples[i].b
+            }
+            let avgR = sumR / coreCount
+            let avgG = sumG / coreCount
+            let avgB = sumB / coreCount
+            if avgR < 38 && avgG < 38 && avgB < 38 {
+                inkColorHex = "#111317"
+            } else {
+                inkColorHex = String(format: "#%02X%02X%02X", avgR, avgG, avgB)
+            }
+        }
+
+        // 4. Determine exact baselineY and capTopY from substantial glyph columns
+        let totalInkH = max(1, maxInkY - minInkY + 1)
+        let minColH = max(2, Int(Double(totalInkH) * 0.38))
+        var bottoms: [Int] = []
+        var tops: [Int] = []
+        bottoms.reserveCapacity(colCount)
+        tops.reserveCapacity(colCount)
+
+        for i in 0..<colCount where colMinY[i] <= colMaxY[i] {
+            let h = colMaxY[i] - colMinY[i] + 1
+            if h >= minColH {
+                bottoms.append(colMaxY[i])
+                tops.append(colMinY[i])
+            }
+        }
+
+        let descenderChars = CharacterSet(charactersIn: "gjpqyçQJy()[]{};,")
+        let hasDescenders = text.unicodeScalars.contains { descenderChars.contains($0) }
+        let capOrDigitChars = CharacterSet.uppercaseLetters.union(.decimalDigits)
+        let hasCapsOrDigits = text.unicodeScalars.contains { capOrDigitChars.contains($0) }
+
+        let baselinePY: Double
+        if bottoms.isEmpty {
+            baselinePY = Double(maxInkY)
+        } else {
+            bottoms.sort()
+            if hasDescenders {
+                // 55th percentile of column bottoms sits directly on the baseline while ignoring descender stems
+                let idx = min(bottoms.count - 1, (bottoms.count * 55) / 100)
+                baselinePY = Double(bottoms[idx])
+            } else {
+                // Without descenders, the 85th percentile of column bottoms is the exact baseline
+                let idx = min(bottoms.count - 1, (bottoms.count * 85) / 100)
+                baselinePY = Double(bottoms[idx])
+            }
+        }
+
+        let capTopPY: Double
+        if tops.isEmpty {
+            capTopPY = Double(minInkY)
+        } else {
+            tops.sort()
+            let idx = min(tops.count - 1, (tops.count * 12) / 100)
+            capTopPY = Double(tops[idx])
+        }
+
+        let tightInkRect = VectorRect(
+            x: Double(minInkX) / scale,
+            y: Double(minInkY) / scale,
+            width: max(6.0, Double(maxInkX - minInkX + 1) / scale),
+            height: max(6.0, Double(maxInkY - minInkY + 1) / scale)
+        )
+        let baselineY = (baselinePY + 0.5) / scale
+        let measuredCapHeight = max(4.0, (baselinePY - capTopPY + 0.5) / scale)
+
+        return RegionMetrics(
+            maskColorHex: maskColorHex,
+            inkColorHex: inkColorHex,
+            tightInkRect: tightInkRect,
+            baselineY: baselineY,
+            measuredCapHeight: measuredCapHeight,
+            hasReliableCapHeight: hasCapsOrDigits && bottoms.count >= 4
+        )
     }
 }

@@ -3,6 +3,14 @@
 La version de SimpleVector vit à un seul endroit : `VERSION` dans `Scripts/bundle.sh` (G110).
 Correctif : `x.y.Z` ; fonction : `x.Y.0` ; rupture : `X.0.0`.
 
+## 0.1.1 — 2026-10-26
+
+- **Fidélité typographique et masquage sans artefact lors de l'édition de texte PDF** (`PDFCodec`, `PDFPageBitmapAnalyzer`, `CanvasViewportView`, `InspectorView`) :
+  - **Échantillonnage automatique de la couleur de fond réelle sous le texte (`maskColorHex`)** : analyse bitmap `2x` en sRGB de chaque page PDF lors de l'import pour prélever la couleur exacte de l'arrière-plan sous chaque ligne (encadré gris `#EBEBEB`, bandeau coloré ou papier blanc `#FFFFFF`), éliminant tout rectangle blanc parasite sous un texte modifié dans un encadré coloré ou grisé.
+  - **Boîte de masquage ajustée au plus près de l'encre (`tightInkRect`)** : détection au demi-point près des pixels d'encre réels de la ligne originale (`insetBy(dx: -0.6, dy: -0.5)`) au lieu de la boîte de sélection brute `PDFSelection`, évitant de déborder sous la ligne ou sur les filets adjacents.
+  - **Conservation de la police, du corps, de la couleur d'encre et de la ligne de base (`baselineOffset`) du PDF** : lecture du `CTFont` natif (`postScriptFontName`, `fontFamily`, `CTFontGetSize`, gras/italique) dans `PDFSelection.attributedString`, alignement sous-pixel de la ligne de base (`baselineY`) entre `CanvasViewportView` (`Font(ctFont)`) et l'export `CoreText`, et découpage automatique des lignes multi-colonnes (p. ex. référence à gauche et date à droite sur la même hauteur).
+- **Fenêtre Réglages (`PreferencesView`)** : correction du dimensionnement (`500 × 500 pt`, alignement haut) pour afficher intégralement l'en-tête **Langue & Mises à jour** et le pied **Réseau & Confidentialité** sans rognage.
+
 ## 0.1.0 — 2026-10-26
 
 - Première version native macOS (`macOS 15`, SwiftPM pur sans dépendance externe) dédiée à l'ouverture, l'édition, la signature et l'enregistrement de documents `.svg` et `.pdf` monopages ou multipages :

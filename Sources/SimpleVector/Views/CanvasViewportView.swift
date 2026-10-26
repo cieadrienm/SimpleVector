@@ -498,27 +498,35 @@ struct CanvasViewportView: View {
 
         case .text(let t):
             let tc = fillRGB ?? strokeRGB ?? RGBAColor(r: 0.07, g: 0.07, b: 0.09)
-            let fontSize = max(5.0, CGFloat(t.fontSize) * geom.scale)
-            var txt = Text(t.text)
-                .font(.system(size: fontSize, weight: t.isBold ? .bold : .regular))
-                .foregroundStyle(Color(red: tc.r, green: tc.g, blue: tc.b, opacity: el.style.opacity))
-            if t.isItalic {
-                txt = txt.italic()
+            let fontSize = max(4.5, CGFloat(t.fontSize) * geom.scale)
+            let ctFont = PDFCodec.resolveCTFont(for: t, size: fontSize)
+            let unscaledFont = PDFCodec.resolveCTFont(for: t, size: CGFloat(t.fontSize))
+            let firstBaselineOffset = t.baselineOffset ?? Double(CTFontGetCapHeight(unscaledFont))
+            let ascent = CTFontGetAscent(ctFont)
+            let lineH = CGFloat(t.fontSize * 1.25) * geom.scale
+            let lines = t.text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+            for (idx, lineStr) in lines.enumerated() where !lineStr.isEmpty {
+                let txt = Text(lineStr)
+                    .font(Font(ctFont))
+                    .tracking(CGFloat(t.letterSpacing) * geom.scale)
+                    .foregroundStyle(Color(red: tc.r, green: tc.g, blue: tc.b, opacity: el.style.opacity))
+                let paneBaselineY = paneRect.minY + CGFloat(firstBaselineOffset) * geom.scale + CGFloat(idx) * lineH
+                let drawTopY = paneBaselineY - ascent
+                let anchorPt: CGPoint
+                let unitAnchor: UnitPoint
+                switch t.alignment {
+                case .left:
+                    anchorPt = CGPoint(x: paneRect.minX, y: drawTopY)
+                    unitAnchor = .topLeading
+                case .center:
+                    anchorPt = CGPoint(x: paneRect.midX, y: drawTopY)
+                    unitAnchor = .top
+                case .right:
+                    anchorPt = CGPoint(x: paneRect.maxX, y: drawTopY)
+                    unitAnchor = .topTrailing
+                }
+                layer.draw(txt, at: anchorPt, anchor: unitAnchor)
             }
-            let anchorPt: CGPoint
-            let unitAnchor: UnitPoint
-            switch t.alignment {
-            case .left:
-                anchorPt = CGPoint(x: paneRect.minX, y: paneRect.minY)
-                unitAnchor = .topLeading
-            case .center:
-                anchorPt = CGPoint(x: paneRect.midX, y: paneRect.minY)
-                unitAnchor = .top
-            case .right:
-                anchorPt = CGPoint(x: paneRect.maxX, y: paneRect.minY)
-                unitAnchor = .topTrailing
-            }
-            layer.draw(txt, at: anchorPt, anchor: unitAnchor)
 
         case .stamp(let st):
             let c = strokeRGB ?? RGBAColor(hex: st.stampKind.defaultColorHex) ?? RGBAColor(r: 0.1, g: 0.6, b: 0.3)
@@ -843,10 +851,19 @@ private struct InlineTextEditorBar: View {
                             if case .text(var t) = el.kind {
                                 t.text = orig
                                 if let origRect = t.originalPDFRect {
-                                    el.frame = VectorRect(x: origRect.x + 1.5, y: origRect.y + 1.0, width: origRect.width - 3.0, height: origRect.height - 2.0)
+                                    el.frame = origRect
+                                }
+                                if let origSize = t.originalFontSize {
+                                    t.fontSize = origSize
+                                }
+                                if let origBold = t.originalIsBold {
+                                    t.isBold = origBold
+                                }
+                                if let origItalic = t.originalIsItalic {
+                                    t.isItalic = origItalic
                                 }
                                 el.kind = .text(t)
-                                el.style.fillColorHex = "#111317"
+                                el.style.fillColorHex = t.originalTextColorHex ?? "#111317"
                             }
                         }
                     }
@@ -887,6 +904,7 @@ private struct InlineTextEditorBar: View {
                 if case .text(var t) = el.kind {
                     t.text = draftText
                     el.kind = .text(t)
+                    PDFCodec.updateTextFrameForEditedContent(&el)
                 }
             }
         }

@@ -778,10 +778,11 @@ struct PreferencesView: View {
                 .font(.system(size: 11))
                 .foregroundStyle(Theme.textDim.swiftUI)
                 .fixedSize(horizontal: false, vertical: true)
-            Spacer()
+            Spacer(minLength: 0)
         }
-        .padding(20)
-        .frame(width: 460, height: 430)
+        .padding(.horizontal, 24)
+        .padding(.vertical, 20)
+        .frame(width: 500, height: 500, alignment: .topLeading)
         .background(Theme.panel.swiftUI)
         .preferredColorScheme(.dark)
         .onAppear {
