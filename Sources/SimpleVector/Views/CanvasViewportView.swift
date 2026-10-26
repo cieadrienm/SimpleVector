@@ -252,6 +252,7 @@ struct CanvasViewportView: View {
     @State private var movingElementInitialFrames: [UUID: VectorRect] = [:]
     @State private var resizingHandleIndex: Int? = nil
     @State private var resizingInitialFrame: VectorRect? = nil
+    @State private var panDragInitialOffset: CGSize? = nil
     @State private var magnifyStartZoom: CGFloat? = nil
 
     var body: some View {
@@ -294,6 +295,7 @@ struct CanvasViewportView: View {
                         backdropImg: backdropImg
                     )
                 }
+                .background(CanvasScrollEventMonitor(model: model))
                 .gesture(canvasDragGesture(geom: geom))
                 .simultaneousGesture(
                     MagnifyGesture()
@@ -596,7 +598,7 @@ struct CanvasViewportView: View {
 
                 case .select:
                     // Check if starting on a resize handle of the selected element
-                    if movingElementInitialFrames.isEmpty && resizingHandleIndex == nil {
+                    if movingElementInitialFrames.isEmpty && resizingHandleIndex == nil && panDragInitialOffset == nil {
                         if let sel = ctrl.primarySelectedElement {
                             let paneRect = geom.pageRectToPane(sel.frame)
                             let handles = cornerHandles(for: paneRect)
@@ -629,10 +631,11 @@ struct CanvasViewportView: View {
                         } else {
                             ctrl.selection.removeAll()
                             model.editingTextElementID = nil
+                            panDragInitialOffset = model.panOffset
                         }
                     }
 
-                    // Apply resize or move if dragging
+                    // Apply resize, element move, or viewport pan if dragging
                     let dx = currentPagePt.x - startPage.x
                     let dy = currentPagePt.y - startPage.y
                     if let hIdx = resizingHandleIndex, let initFrame = resizingInitialFrame, let selID = ctrl.primarySelectedElement?.id {
@@ -658,6 +661,11 @@ struct CanvasViewportView: View {
                                 el.frame = initFrame.offsetBy(dx: dx, dy: dy)
                             }
                         }
+                    } else if let initPan = panDragInitialOffset, hypot(value.translation.width, value.translation.height) > 2.0 {
+                        model.panOffset = CGSize(
+                            width: initPan.width + value.translation.width,
+                            height: initPan.height + value.translation.height
+                        )
                     }
                 }
             }
@@ -742,6 +750,7 @@ struct CanvasViewportView: View {
                     movingElementInitialFrames.removeAll()
                     resizingHandleIndex = nil
                     resizingInitialFrame = nil
+                    panDragInitialOffset = nil
                 }
             }
     }
@@ -1009,5 +1018,82 @@ private struct MultiPageCardView: View {
             RoundedRectangle(cornerRadius: 10)
                 .fill(isCurrent ? Theme.laneSelected.swiftUI : Theme.panel.swiftUI)
         )
+    }
+}
+
+// MARK: - 60–120 Hz Trackpad Two-Finger Scroll & Mouse Wheel Pan / Zoom Monitor
+
+private struct CanvasScrollEventMonitor: NSViewRepresentable {
+    let model: AppModel
+
+    func makeNSView(context: Context) -> ScrollMonitorNSView {
+        let view = ScrollMonitorNSView()
+        view.model = model
+        return view
+    }
+
+    func updateNSView(_ nsView: ScrollMonitorNSView, context: Context) {
+        nsView.model = model
+    }
+
+    @MainActor
+    final class ScrollMonitorNSView: NSView {
+        weak var model: AppModel?
+        private var monitor: Any?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            if window != nil && monitor == nil {
+                monitor = NSEvent.addLocalMonitorForEvents(matching: [.scrollWheel]) { [weak self] event in
+                    guard let self,
+                          let model = self.model,
+                          model.displayMode == .singlePage,
+                          !model.hasOpenSheet,
+                          let win = self.window,
+                          event.window === win else {
+                        return event
+                    }
+                    let localPt = self.convert(event.locationInWindow, from: nil)
+                    guard self.bounds.contains(localPt) else { return event }
+
+                    let scale: CGFloat = event.hasPreciseScrollingDeltas ? 1.0 : 10.0
+                    let dx = event.scrollingDeltaX * scale
+                    let dy = event.scrollingDeltaY * scale
+                    let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+
+                    if flags.contains(.command) || flags.contains(.option) {
+                        let factor = exp(dy * 0.005)
+                        let oldZoom = model.zoomScale
+                        let newZoom = min(6.0, max(0.25, oldZoom * factor))
+                        let ratio = newZoom / max(0.01, oldZoom)
+                        let center = CGPoint(x: self.bounds.width * 0.5, y: self.bounds.height * 0.5)
+                        let cursorOffset = CGPoint(
+                            x: localPt.x - center.x,
+                            y: (self.bounds.height - localPt.y) - center.y
+                        )
+                        model.zoomScale = newZoom
+                        model.panOffset = CGSize(
+                            width: model.panOffset.width * ratio + cursorOffset.x * (1.0 - ratio),
+                            height: model.panOffset.height * ratio + cursorOffset.y * (1.0 - ratio)
+                        )
+                    } else {
+                        model.panOffset = CGSize(
+                            width: model.panOffset.width + dx,
+                            height: model.panOffset.height + dy
+                        )
+                    }
+                    return nil
+                }
+            } else if window == nil, let m = monitor {
+                NSEvent.removeMonitor(m)
+                monitor = nil
+            }
+        }
+
+        deinit {
+            if let m = monitor {
+                NSEvent.removeMonitor(m)
+            }
+        }
     }
 }

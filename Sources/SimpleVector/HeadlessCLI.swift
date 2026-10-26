@@ -102,6 +102,25 @@ enum HeadlessCLI {
                 let inURL = URL(fileURLWithPath: (inputPath as NSString).expandingTildeInPath)
                 try ctrl.openFile(at: inURL)
             }
+            if let rIdx = arguments.firstIndex(of: "--replace-text"), rIdx + 2 < arguments.count {
+                let match = arguments[rIdx + 1]
+                let replacement = arguments[rIdx + 2]
+                ctrl.perform { doc in
+                    for pIdx in doc.pages.indices {
+                        for el in doc.pages[pIdx].elements {
+                            if case .text(let t) = el.kind, t.text.localizedCaseInsensitiveContains(match) {
+                                VectorOperations.updateElement(id: el.id, onPage: pIdx, in: &doc) { target in
+                                    if case .text(var tp) = target.kind {
+                                        tp.text = replacement
+                                        target.kind = .text(tp)
+                                        PDFCodec.updateTextFrameForEditedContent(&target)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             if let signer = value(after: "--sign", in: arguments) {
                 let preset = SignaturePreset(
                     title: signer,

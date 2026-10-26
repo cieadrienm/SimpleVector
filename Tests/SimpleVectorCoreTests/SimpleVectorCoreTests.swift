@@ -74,10 +74,18 @@ struct SimpleVectorCoreTests {
         var imported = try PDFCodec.importPDF(data: rawPDFData, title: "Imported")
         #expect(imported.modifiedPDFTextCount == 0)
 
+        let siretEl = try #require(imported.pages[0].elements.first {
+            if case .text(let t) = $0.kind { return t.text.contains("81210337200015") }
+            return false
+        })
         let compteEl = try #require(imported.pages[0].elements.first {
             if case .text(let t) = $0.kind { return t.text.contains("748 7200283419") }
             return false
         })
+
+        // Verify exact horizontal alignment (no Left Side Bearing double-shift)
+        #expect(abs(compteEl.frame.x - siretEl.frame.x) < 0.05)
+        #expect(abs(compteEl.frame.x - 52.0) < 0.05)
 
         // Verify multi-column separation: "Limoges" must NOT be merged into "N° Compte"
         if case .text(let t) = compteEl.kind {

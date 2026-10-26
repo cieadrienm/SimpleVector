@@ -3,6 +3,13 @@
 La version de SimpleVector vit à un seul endroit : `VERSION` dans `Scripts/bundle.sh` (G110).
 Correctif : `x.y.Z` ; fonction : `x.Y.0` ; rupture : `X.0.0`.
 
+## 0.1.3 — 2026-10-26
+
+- **Déplacement fluide du canevas au scroll trackpad / molette (60–120 Hz)** (`CanvasViewportView`, `CanvasScrollEventMonitor`) :
+  - Prise en charge directe du défilement à deux doigts au trackpad et à la molette (`NSEvent.EventTypeMask.scrollWheel`) sur le canevas pour déplacer la page horizontalement et verticalement, ainsi que du zoom centré sous le curseur avec `⌘ + scroll` ou `⌥ + scroll` et du glisser sur une zone vide avec l'outil Sélection (`V`).
+- **Alignement horizontal exact (`0,00 pt`) lors de l'édition d'un texte PDF** (`PDFCodec.buildExtractedTextElement`) :
+  - Conservation de l'origine typographique `X` exacte de la ligne PDF (`selX = pdfBounds.minX - mediaBox.minX`) et de la ligne de base `selTopY + CTFontGetAscent(ctFont)` au lieu du bord d'encre `minInkX`, éliminant le double ajout de l'approche gauche du premier glyphe (*Left Side Bearing*, `~0,70–0,95 pt` vers la droite sur un `'N'`).
+
 ## 0.1.2 — 2026-10-26
 
 - **Menu `Fichier > Ouvrir récent` (`Open Recent`)** (`SimpleVectorApp`, `AppModel`) : ajout du sous-menu listant jusqu'à 12 documents `.pdf` ou `.svg` récemment ouverts ou enregistrés, synchronisé avec `NSDocumentController.shared` et `UserDefaults`, avec action **Effacer le menu**.

@@ -3,7 +3,7 @@ import Foundation
 /// Version and build reported by SimpleVector (status bar, About sheet, `--version`).
 /// Both are stamped into the bundle's `Info.plist` by `Scripts/bundle.sh`.
 struct AppVersion: Equatable, CustomStringConvertible, Sendable {
-    static let defaultVersion = "0.1.2"
+    static let defaultVersion = "0.1.3"
 
     let version: String
     let build: String?

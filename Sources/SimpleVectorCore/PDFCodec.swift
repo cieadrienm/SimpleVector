@@ -201,7 +201,15 @@ public enum PDFCodec {
 
         let maskColorHex = bitmapMetrics?.maskColorHex ?? "#FFFFFF"
         let textColorHex = bitmapMetrics?.inkColorHex ?? attrInfo.colorHex ?? "#111317"
-        let tightFrame = bitmapMetrics?.tightInkRect ?? selectionRect
+        let tightInk = bitmapMetrics?.tightInkRect ?? selectionRect
+        // Preserve the exact typographical X origin (`selX = pdfBounds.minX - mediaBox.minX`) so the first glyph's
+        // native Left Side Bearing (LSB) is never added twice, while using `tightInk` for vertical ink bounds.
+        let tightFrame = VectorRect(
+            x: selX,
+            y: tightInk.y,
+            width: max(selW, tightInk.maxX - selX),
+            height: tightInk.height
+        )
 
         // 4. Keep exact PDF font size when attributedString provides it; otherwise calibrate from measured cap-height
         var fontSize = attrInfo.fontSize
@@ -236,11 +244,20 @@ public enum PDFCodec {
             size: CGFloat(fontSize)
         )
         let capH = Double(CTFontGetCapHeight(resolvedFont))
+        let ascent = Double(CTFontGetAscent(resolvedFont))
+        let pdfTypographicalBaselineY = selTopY + ascent
         let baselineOffset: Double
         if let metrics = bitmapMetrics {
-            baselineOffset = max(capH * 0.88, min(tightFrame.height + 1.0, metrics.baselineY - tightFrame.y - 0.30))
+            let bitmapBaselineY = metrics.baselineY + 0.20
+            let chosenBaselineY: Double
+            if attrInfo.hadExplicitFont && abs(pdfTypographicalBaselineY - bitmapBaselineY) <= 1.4 {
+                chosenBaselineY = pdfTypographicalBaselineY
+            } else {
+                chosenBaselineY = bitmapBaselineY
+            }
+            baselineOffset = max(capH * 0.88, min(tightFrame.height + 1.5, chosenBaselineY - tightFrame.y))
         } else {
-            baselineOffset = capH
+            baselineOffset = attrInfo.hadExplicitFont ? max(capH, pdfTypographicalBaselineY - tightFrame.y) : capH
         }
 
         // 6. Compute subtle letter-spacing only if the PDF font was substituted by a fallback font
@@ -250,13 +267,13 @@ public enum PDFCodec {
         if let reqPS = attrInfo.postScriptName?.lowercased(), !reqPS.isEmpty {
             wasSubstituted = !resolvedPS.hasPrefix(reqPS.prefix(5))
         } else {
-            wasSubstituted = true
+            wasSubstituted = !attrInfo.hadExplicitFont
         }
         let charCount = rawText.count
         if wasSubstituted, charCount >= 4, let metrics = bitmapMetrics, metrics.tightInkRect.width > 12.0 {
             let unkernedWidth = measureSingleLineWidth(rawText, ctFont: resolvedFont, kern: 0.0)
             if unkernedWidth > 4.0 {
-                let targetWidth = max(4.0, metrics.tightInkRect.width - 0.7)
+                let targetWidth = max(4.0, metrics.tightInkRect.width - 0.4)
                 let delta = targetWidth - unkernedWidth
                 let perGap = delta / Double(charCount - 1)
                 if abs(perGap) <= 0.40 {
