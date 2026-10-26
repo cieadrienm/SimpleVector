@@ -113,6 +113,49 @@ struct SimpleVectorCoreTests {
         #expect(imported.pages[0].activeMaskRects[0].colorHex != "#FFFFFF")
     }
 
+    @Test("Vertical ink band segmentation isolates closely-spaced headings from body lines below")
+    func testCloselySpacedHeadingDoesNotBleedIntoBodyLine() throws {
+        var page = VectorPage(title: "Canva Layout Test", width: 595.5, height: 906.75, backgroundColorHex: "#F4F2ED")
+        page.elements.append(VectorElement(
+            name: "Heading",
+            kind: .text(TextPayload(text: "PLINTHES", fontFamily: "Helvetica Neue", postScriptFontName: "HelveticaNeue-Bold", fontSize: 16.87, isBold: true)),
+            frame: VectorRect(x: 205.41, y: 339.5, width: 85.0, height: 12.0),
+            style: VectorStyle(strokeColorHex: nil, fillColorHex: "#5A5851", strokeWidth: 0)
+        ))
+        page.elements.append(VectorElement(
+            name: "Body Line 1",
+            kind: .text(TextPayload(text: "Les plinthes sont vendues en 220 cm.", fontFamily: "Helvetica Neue", postScriptFontName: "HelveticaNeue", fontSize: 8.6)),
+            frame: VectorRect(x: 205.41, y: 356.0, width: 200.0, height: 8.0),
+            style: VectorStyle(strokeColorHex: nil, fillColorHex: "#5A5851", strokeWidth: 0)
+        ))
+
+        let rawPDFData = try PDFCodec.exportPDF(document: VectorDocument(title: "Canva", pages: [page]))
+        var imported = try PDFCodec.importPDF(data: rawPDFData, title: "ImportedCanva")
+
+        let headingEl = try #require(imported.pages[0].elements.first {
+            if case .text(let t) = $0.kind { return t.text == "PLINTHES" }
+            return false
+        })
+        let bodyEl = try #require(imported.pages[0].elements.first {
+            if case .text(let t) = $0.kind { return t.text.contains("Les plinthes sont") }
+            return false
+        })
+
+        // Heading tight frame must not overlap the body line below it
+        #expect(headingEl.frame.maxY < bodyEl.frame.minY)
+
+        // Edit heading and verify its active mask rect stays strictly above the body line
+        VectorOperations.updateElement(id: headingEl.id, onPage: 0, in: &imported) { el in
+            if case .text(var t) = el.kind {
+                t.text = "PLINTHES DE LA MORT"
+                el.kind = .text(t)
+                PDFCodec.updateTextFrameForEditedContent(&el)
+            }
+        }
+        let maskRect = try #require(imported.pages[0].activeMaskRects.first?.rect)
+        #expect(maskRect.maxY < bodyEl.frame.minY)
+    }
+
     @Test("SVG multi-page export and re-import round-trip")
     func testSVGRoundTrip() throws {
         let doc = SyntheticDocument.makeStageContractAndPlot()

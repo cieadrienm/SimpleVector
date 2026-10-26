@@ -610,8 +610,8 @@ struct CanvasViewportView: View {
                             }
                         }
 
-                        // Hit-test elements from top to bottom
-                        if let hit = ctrl.currentPage.elements.reversed().first(where: { $0.visible && $0.frame.contains(startPage, margin: 4.0) }) {
+                        // Hit-test elements from top to bottom (preferring tight containment and closest vertical center)
+                        if let hit = Self.hitTestElement(at: startPage, in: ctrl.currentPage.elements, textOnly: false) {
                             if !ctrl.selection.contains(hit.id) {
                                 ctrl.selection = [hit.id]
                             }
@@ -734,10 +734,7 @@ struct CanvasViewportView: View {
                     model.activeTool = .select
 
                 case .text:
-                    if let hit = ctrl.currentPage.elements.reversed().first(where: {
-                        guard $0.visible, case .text = $0.kind else { return false }
-                        return $0.frame.contains(endPage, margin: 4.0)
-                    }) {
+                    if let hit = Self.hitTestElement(at: endPage, in: ctrl.currentPage.elements, textOnly: true) {
                         ctrl.selection = [hit.id]
                         model.editingTextElementID = hit.id
                     } else {
@@ -753,6 +750,27 @@ struct CanvasViewportView: View {
                     panDragInitialOffset = nil
                 }
             }
+    }
+
+    static func hitTestElement(at pagePt: VectorPoint, in elements: [VectorElement], textOnly: Bool) -> VectorElement? {
+        let candidates = elements.reversed().filter { el in
+            guard el.visible else { return false }
+            if textOnly {
+                guard case .text = el.kind else { return false }
+            }
+            return el.frame.contains(pagePt, margin: 3.0)
+        }
+        guard !candidates.isEmpty else { return nil }
+
+        // Prefer elements whose tight frame (margin <= 0.5) contains the point
+        let tightCandidates = candidates.filter { $0.frame.contains(pagePt, margin: 0.5) }
+        let pool = tightCandidates.isEmpty ? candidates : tightCandidates
+
+        return pool.min { a, b in
+            let distA = abs(a.frame.midY - pagePt.y)
+            let distB = abs(b.frame.midY - pagePt.y)
+            return distA < distB
+        }
     }
 
     private func canvasBottomHUD(page: VectorPage) -> some View {

@@ -3,6 +3,14 @@
 La version de SimpleVector vit à un seul endroit : `VERSION` dans `Scripts/bundle.sh` (G110).
 Correctif : `x.y.Z` ; fonction : `x.Y.0` ; rupture : `X.0.0`.
 
+## 0.1.4 — 2026-10-26
+
+- **Segmentation verticale universelle par bandes d'encre (`PDFPageBitmapAnalyzer.analyzeTextRegion`) et fidélité multi-logiciels (Canva, Illustrator, InDesign, Word, LibreOffice)** :
+  - **Isolation de la bande d'encre propre à chaque ligne** : dans de nombreux PDF générés par Canva, Illustrator ou avec des polices sous-ensemblées (*subset fonts* telles que `LEMONMILK-Bold`), la boîte `FontBBox` déclarée par la police déborde largement au-dessus et en dessous des glyphes réels (`27,7 pt` de haut pour un titre en `16,9 pt`) et recouvre la première ligne du paragraphe suivant. L'analyseur `2x` segmente désormais le profil horizontal d'encre ligne de pixels par ligne de pixels (`rowInkCount`), fusionne les signes diacritiques (`É`, `À`, `Î`, points sur `i`/`j`, cédilles) à l'intérieur d'une même ligne, pénalise les bandes tronquées issues des lignes voisines et fend automatiquement au creux d'encre (*valley splitting*) deux lignes rapprochées. Le masque `tightInkRect` et la ligne de base `baselineY` restent ainsi strictement confinés à la ligne éditée sans jamais mordre sur la ligne du dessous ni décaler le texte vers le bas.
+  - **Conservation du flux PDF original sans re-sérialisation `PDFPage.dataRepresentation`** (`PDFCodec.importPDF`) : préservation de l'origine exacte du `mediaBox` (y compris lorsque `minY != 0`) et des caractères accentués précomposés Unicode sans décomposition NFD susceptible de décaler les plages `NSRange`.
+  - **Maintien de l'intégrité des lignes contenant des apostrophes et détection optique de graisse (`appearsBold`)** : empêche `selectionsByLine()` de scinder une même ligne autour d'une apostrophe et détecte l'épaisseur médiane des fûts dans le bitmap lorsque PDFKit substitue une police système non grasse à une police embarquée Titrage/Bold.
+  - **Sélection au clic plus précise sur les lignes rapprochées** (`CanvasViewportView.hitTestElement`) : priorité aux boîtes d'encre contenant directement le point cliqué et arbitrage par distance au centre vertical de la ligne.
+
 ## 0.1.3 — 2026-10-26
 
 - **Déplacement fluide du canevas au scroll trackpad / molette (60–120 Hz)** (`CanvasViewportView`, `CanvasScrollEventMonitor`) :

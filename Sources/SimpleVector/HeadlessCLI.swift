@@ -106,6 +106,22 @@ enum HeadlessCLI {
                 let match = arguments[rIdx + 1]
                 let replacement = arguments[rIdx + 2]
                 ctrl.perform { doc in
+                    var foundExact = false
+                    for pIdx in doc.pages.indices {
+                        for el in doc.pages[pIdx].elements {
+                            if case .text(let t) = el.kind, t.text.trimmingCharacters(in: .whitespacesAndNewlines) == match {
+                                foundExact = true
+                                VectorOperations.updateElement(id: el.id, onPage: pIdx, in: &doc) { target in
+                                    if case .text(var tp) = target.kind {
+                                        tp.text = replacement
+                                        target.kind = .text(tp)
+                                        PDFCodec.updateTextFrameForEditedContent(&target)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    guard !foundExact else { return }
                     for pIdx in doc.pages.indices {
                         for el in doc.pages[pIdx].elements {
                             if case .text(let t) = el.kind, t.text.localizedCaseInsensitiveContains(match) {

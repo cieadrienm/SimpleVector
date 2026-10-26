@@ -25,14 +25,10 @@ public enum PDFCodec {
             let w = max(64.0, Double(box.width))
             let h = max(64.0, Double(box.height))
 
-            let singleDoc = PDFDocument()
-            if let pageCopy = pdfPage.copy() as? PDFPage {
-                singleDoc.insert(pageCopy, at: 0)
-            }
-            let singlePageData = singleDoc.dataRepresentation()
             let extractedElements = extractEditableTextElements(
                 from: pdfPage,
-                singlePageData: singlePageData,
+                singlePageData: data,
+                pageIndex: i,
                 pageWidth: w,
                 pageHeight: h
             )
@@ -42,8 +38,8 @@ public enum PDFCodec {
                 width: w,
                 height: h,
                 backgroundColorHex: "#FFFFFF",
-                pdfPageData: singlePageData,
-                pdfPageIndex: 0,
+                pdfPageData: data,
+                pdfPageIndex: i,
                 redactedPDFRects: [],
                 elements: extractedElements
             )
@@ -63,6 +59,7 @@ public enum PDFCodec {
     public static func extractEditableTextElements(
         from pdfPage: PDFPage,
         singlePageData: Data? = nil,
+        pageIndex: Int = 0,
         pageWidth: Double,
         pageHeight: Double
     ) -> [VectorElement] {
@@ -73,6 +70,7 @@ public enum PDFCodec {
         let bitmapAnalyzer = PDFPageBitmapAnalyzer(
             pdfPage: pdfPage,
             singlePageData: singlePageData,
+            pageIndex: pageIndex,
             pageWidth: pageWidth,
             pageHeight: pageHeight
         )
@@ -97,7 +95,17 @@ public enum PDFCodec {
             for colRange in columnRanges {
                 guard let sel = pdfPage.selection(for: colRange) else { continue }
                 let lineSelections = sel.selectionsByLine()
-                let targets = lineSelections.isEmpty ? [sel] : lineSelections
+                let targets: [PDFSelection]
+                if lineSelections.count <= 1 {
+                    targets = [sel]
+                } else {
+                    let firstBounds = lineSelections[0].bounds(for: pdfPage)
+                    let refH = max(8.0, firstBounds.height)
+                    let allSameRow = lineSelections.allSatisfy {
+                        abs($0.bounds(for: pdfPage).midY - firstBounds.midY) <= refH * 0.55
+                    }
+                    targets = allSameRow ? [sel] : lineSelections
+                }
 
                 for lineSel in targets {
                     guard let element = buildExtractedTextElement(
@@ -197,10 +205,15 @@ public enum PDFCodec {
 
         // 3. Analyze the rendered PDF bitmap inside selectionRect for exact background color, ink color,
         //    tight glyph bounding box, and sub-point baseline position
-        let bitmapMetrics = bitmapAnalyzer?.analyzeTextRegion(selectionRect: selectionRect, text: rawText)
+        let bitmapMetrics = bitmapAnalyzer?.analyzeTextRegion(
+            selectionRect: selectionRect,
+            text: rawText,
+            expectedFontSize: attrInfo.fontSize
+        )
 
         let maskColorHex = bitmapMetrics?.maskColorHex ?? "#FFFFFF"
         let textColorHex = bitmapMetrics?.inkColorHex ?? attrInfo.colorHex ?? "#111317"
+        let effectiveIsBold = attrInfo.isBold || (bitmapMetrics?.appearsBold ?? false)
         let tightInk = bitmapMetrics?.tightInkRect ?? selectionRect
         // Preserve the exact typographical X origin (`selX = pdfBounds.minX - mediaBox.minX`) so the first glyph's
         // native Left Side Bearing (LSB) is never added twice, while using `tightInk` for vertical ink bounds.
@@ -218,7 +231,7 @@ public enum PDFCodec {
             fontFamily: attrInfo.fontFamily,
             postScriptFontName: attrInfo.postScriptName,
             fontSize: fontSize,
-            isBold: attrInfo.isBold,
+            isBold: effectiveIsBold,
             isItalic: attrInfo.isItalic
         )
 
@@ -238,7 +251,7 @@ public enum PDFCodec {
                 fontFamily: attrInfo.fontFamily,
                 postScriptFontName: attrInfo.postScriptName,
                 fontSize: fontSize,
-                isBold: attrInfo.isBold,
+                isBold: effectiveIsBold,
                 isItalic: attrInfo.isItalic
             ),
             size: CGFloat(fontSize)
@@ -287,7 +300,7 @@ public enum PDFCodec {
             fontFamily: attrInfo.fontFamily,
             postScriptFontName: attrInfo.postScriptName,
             fontSize: fontSize,
-            isBold: attrInfo.isBold,
+            isBold: effectiveIsBold,
             isItalic: attrInfo.isItalic,
             alignment: .left,
             baselineOffset: baselineOffset,
@@ -296,7 +309,7 @@ public enum PDFCodec {
             originalPDFText: rawText,
             originalPDFRect: tightFrame,
             originalFontSize: fontSize,
-            originalIsBold: attrInfo.isBold,
+            originalIsBold: effectiveIsBold,
             originalIsItalic: attrInfo.isItalic,
             originalTextColorHex: textColorHex,
             maskColorHex: maskColorHex
@@ -388,8 +401,10 @@ public enum PDFCodec {
             }
         }
 
-        // Extract foreground color if available as CGColor
-        let colorObj = attrs[NSAttributedString.Key("NSColor")] ?? attrs[kCTForegroundColorAttributeName as NSAttributedString.Key]
+        // Extract foreground color if available as CGColor (including PDFKit's internal kCPfillColor key)
+        let colorObj = attrs[NSAttributedString.Key("kCPfillColor")]
+            ?? attrs[NSAttributedString.Key("NSColor")]
+            ?? attrs[kCTForegroundColorAttributeName as NSAttributedString.Key]
         if let colorObj {
             let cfRef = colorObj as CFTypeRef
             if CFGetTypeID(cfRef) == CGColor.typeID {
@@ -954,9 +969,10 @@ private final class PDFPageBitmapAnalyzer {
         let baselineY: Double
         let measuredCapHeight: Double
         let hasReliableCapHeight: Bool
+        let appearsBold: Bool
     }
 
-    init?(pdfPage: PDFPage, singlePageData: Data?, pageWidth: Double, pageHeight: Double) {
+    init?(pdfPage: PDFPage, singlePageData: Data?, pageIndex: Int = 0, pageWidth: Double, pageHeight: Double) {
         let s: Double = 2.0
         let pw = max(16, Int(round(pageWidth * s)))
         let ph = max(16, Int(round(pageHeight * s)))
@@ -979,10 +995,7 @@ private final class PDFPageBitmapAnalyzer {
             ctx.setFillColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1))
             ctx.fill(CGRect(x: 0, y: 0, width: pw, height: ph))
 
-            if let data = singlePageData,
-               let provider = CGDataProvider(data: data as CFData),
-               let cgPDF = CGPDFDocument(provider),
-               let cgPage = cgPDF.page(at: 1) {
+            if let cgPage = pdfPage.pageRef {
                 let mediaBox = cgPage.getBoxRect(.mediaBox)
                 ctx.scaleBy(
                     x: CGFloat(pw) / max(1, mediaBox.width),
@@ -991,7 +1004,10 @@ private final class PDFPageBitmapAnalyzer {
                 ctx.translateBy(x: -mediaBox.minX, y: -mediaBox.minY)
                 ctx.drawPDFPage(cgPage)
                 return true
-            } else if let cgPage = pdfPage.pageRef {
+            } else if let data = singlePageData,
+                      let provider = CGDataProvider(data: data as CFData),
+                      let cgPDF = CGPDFDocument(provider),
+                      let cgPage = cgPDF.page(at: max(1, pageIndex + 1)) {
                 let mediaBox = cgPage.getBoxRect(.mediaBox)
                 ctx.scaleBy(
                     x: CGFloat(pw) / max(1, mediaBox.width),
@@ -1010,7 +1026,11 @@ private final class PDFPageBitmapAnalyzer {
         self.buffer = raw
     }
 
-    func analyzeTextRegion(selectionRect: VectorRect, text: String) -> RegionMetrics {
+    func analyzeTextRegion(
+        selectionRect: VectorRect,
+        text: String,
+        expectedFontSize: Double = 12.0
+    ) -> RegionMetrics {
         let px0 = max(0, min(pixelW - 1, Int(floor(selectionRect.minX * scale))))
         let px1 = max(px0, min(pixelW - 1, Int(ceil(selectionRect.maxX * scale))))
         let py0 = max(0, min(pixelH - 1, Int(floor(selectionRect.minY * scale))))
@@ -1046,7 +1066,131 @@ private final class PDFPageBitmapAnalyzer {
 
         let maskColorHex = String(format: "#%02X%02X%02X", bgSample.r, bgSample.g, bgSample.b)
 
-        // 2. Scan for glyph ink pixels inside selectionRect that contrast with bgSample
+        // 2. Vertical ink band segmentation inside selectionRect:
+        //    Some PDFs (e.g., Canva/Illustrator subset fonts) declare an inflated FontBBox whose selectionRect
+        //    overlaps the line above or below. Segmenting the horizontal row-ink profile into contiguous vertical
+        //    bands across blank inter-line gaps isolates strictly the target text line's glyphs.
+        let rowCount = max(1, py1 - py0 + 1)
+        var rowInkCount = [Int](repeating: 0, count: rowCount)
+        var peakRowInk = 0
+        for py in py0...py1 {
+            let rowOffset = py * bytesPerRow
+            var count = 0
+            for px in px0...px1 {
+                let idx = rowOffset + px * 4
+                let r = Int(buffer[idx])
+                let g = Int(buffer[idx + 1])
+                let b = Int(buffer[idx + 2])
+                let dist = max(abs(r - bgSample.r), max(abs(g - bgSample.g), abs(b - bgSample.b)))
+                if dist >= 22 {
+                    count += 1
+                }
+            }
+            rowInkCount[py - py0] = count
+            if count > peakRowInk { peakRowInk = count }
+        }
+
+        struct VerticalBand {
+            var startPY: Int
+            var endPY: Int
+            var inkSum: Int
+            var height: Int { endPY - startPY + 1 }
+        }
+
+        var rawBands: [VerticalBand] = []
+        var currentBand: VerticalBand? = nil
+        for py in py0...py1 {
+            let c = rowInkCount[py - py0]
+            if c > 0 {
+                if var b = currentBand {
+                    b.endPY = py
+                    b.inkSum += c
+                    currentBand = b
+                } else {
+                    currentBand = VerticalBand(startPY: py, endPY: py, inkSum: c)
+                }
+            } else if let b = currentBand {
+                rawBands.append(b)
+                currentBand = nil
+            }
+        }
+        if let b = currentBand {
+            rawBands.append(b)
+        }
+
+        guard !rawBands.isEmpty else {
+            return RegionMetrics(
+                maskColorHex: maskColorHex,
+                inkColorHex: nil,
+                tightInkRect: selectionRect,
+                baselineY: selectionRect.minY + selectionRect.height * 0.80,
+                measuredCapHeight: selectionRect.height * 0.65,
+                hasReliableCapHeight: false,
+                appearsBold: false
+            )
+        }
+
+        // Merge small intra-line gaps (accents É/È/À/Î or dots on i/j above body, or cedilla below body)
+        var mergedBands: [VerticalBand] = [rawBands[0]]
+        for next in rawBands.dropFirst() {
+            let prev = mergedBands[mergedBands.count - 1]
+            let gap = next.startPY - prev.endPY - 1
+            let isUpperAccent = (gap <= 5 && prev.height <= 6)
+            let isLowerCedilla = (gap <= 3 && next.height <= 4)
+            if gap <= 2 || isUpperAccent || isLowerCedilla {
+                mergedBands[mergedBands.count - 1] = VerticalBand(
+                    startPY: prev.startPY,
+                    endPY: next.endPY,
+                    inkSum: prev.inkSum + next.inkSum
+                )
+            } else {
+                mergedBands.append(next)
+            }
+        }
+
+        let hasInteriorBand = mergedBands.contains { $0.startPY > py0 + 1 && $0.endPY < py1 - 1 && $0.height >= 4 }
+        let selMid = Double(py0 + py1) * 0.5
+        let selHalfH = max(1.0, Double(py1 - py0) * 0.5)
+        var chosenBand = mergedBands.max { a, b in
+            func bandScore(_ band: VerticalBand) -> Double {
+                let mid = Double(band.startPY + band.endPY) * 0.5
+                let distNorm = abs(mid - selMid) / selHalfH
+                let touchesEdge = (band.startPY <= py0 + 1) || (band.endPY >= py1 - 1)
+                let edgePenalty = (hasInteriorBand && touchesEdge) ? 0.15 : 1.0
+                return Double(band.inkSum) * edgePenalty / (1.0 + distNorm * 1.5)
+            }
+            return bandScore(a) < bandScore(b)
+        } ?? mergedBands[0]
+
+        // Valley split if a single descender pixel bridged across a narrow inter-line gap
+        let maxExpectedBandPx = max(24, Int(ceil(expectedFontSize * scale * 1.32)))
+        if chosenBand.height > maxExpectedBandPx && chosenBand.height >= 12 {
+            let valleyThreshold = max(2, peakRowInk / 14)
+            let searchMin = chosenBand.startPY + 4
+            let searchMax = chosenBand.endPY - 4
+            if searchMin < searchMax {
+                var bestValleyPY: Int? = nil
+                var minValleyInk = Int.max
+                for py in searchMin...searchMax {
+                    let c = rowInkCount[py - py0]
+                    if c <= valleyThreshold && c < minValleyInk {
+                        minValleyInk = c
+                        bestValleyPY = py
+                    }
+                }
+                if let vPY = bestValleyPY {
+                    let topSub = VerticalBand(startPY: chosenBand.startPY, endPY: vPY - 1, inkSum: 1)
+                    let botSub = VerticalBand(startPY: vPY + 1, endPY: chosenBand.endPY, inkSum: 1)
+                    let topMid = Double(topSub.startPY + topSub.endPY) * 0.5
+                    let botMid = Double(botSub.startPY + botSub.endPY) * 0.5
+                    chosenBand = abs(topMid - selMid) <= abs(botMid - selMid) ? topSub : botSub
+                }
+            }
+        }
+
+        let scanY0 = chosenBand.startPY
+        let scanY1 = chosenBand.endPY
+
         var minInkX = Int.max
         var maxInkX = Int.min
         var minInkY = Int.max
@@ -1056,16 +1200,18 @@ private final class PDFPageBitmapAnalyzer {
         var colMinY = [Int](repeating: Int.max, count: colCount)
         var colMaxY = [Int](repeating: Int.min, count: colCount)
         var inkSamples: [(dist: Int, r: Int, g: Int, b: Int)] = []
+        var runLengths: [Int] = []
 
-        for py in py0...py1 {
+        for py in scanY0...scanY1 {
             let rowOffset = py * bytesPerRow
+            var curRun = 0
             for px in px0...px1 {
                 let idx = rowOffset + px * 4
                 let r = Int(buffer[idx])
                 let g = Int(buffer[idx + 1])
                 let b = Int(buffer[idx + 2])
                 let dist = max(abs(r - bgSample.r), max(abs(g - bgSample.g), abs(b - bgSample.b)))
-                if dist >= 26 {
+                if dist >= 22 {
                     if px < minInkX { minInkX = px }
                     if px > maxInkX { maxInkX = px }
                     if py < minInkY { minInkY = py }
@@ -1073,10 +1219,22 @@ private final class PDFPageBitmapAnalyzer {
                     let cIdx = px - px0
                     if py < colMinY[cIdx] { colMinY[cIdx] = py }
                     if py > colMaxY[cIdx] { colMaxY[cIdx] = py }
+                    if dist >= 45 {
+                        curRun += 1
+                    } else if curRun > 0 {
+                        runLengths.append(curRun)
+                        curRun = 0
+                    }
                     if dist >= 55 {
                         inkSamples.append((dist, r, g, b))
                     }
+                } else if curRun > 0 {
+                    runLengths.append(curRun)
+                    curRun = 0
                 }
+            }
+            if curRun > 0 {
+                runLengths.append(curRun)
             }
         }
 
@@ -1087,7 +1245,8 @@ private final class PDFPageBitmapAnalyzer {
                 tightInkRect: selectionRect,
                 baselineY: selectionRect.minY + selectionRect.height * 0.80,
                 measuredCapHeight: selectionRect.height * 0.65,
-                hasReliableCapHeight: false
+                hasReliableCapHeight: false,
+                appearsBold: false
             )
         }
 
@@ -1158,6 +1317,10 @@ private final class PDFPageBitmapAnalyzer {
             capTopPY = Double(tops[idx])
         }
 
+        runLengths.sort()
+        let medianRun = runLengths.isEmpty ? 0 : runLengths[runLengths.count / 2]
+        let appearsBold = totalInkH >= 14 && (Double(medianRun) / Double(totalInkH)) >= 0.25
+
         let tightInkRect = VectorRect(
             x: Double(minInkX) / scale,
             y: Double(minInkY) / scale,
@@ -1173,7 +1336,8 @@ private final class PDFPageBitmapAnalyzer {
             tightInkRect: tightInkRect,
             baselineY: baselineY,
             measuredCapHeight: measuredCapHeight,
-            hasReliableCapHeight: hasCapsOrDigits && bottoms.count >= 4
+            hasReliableCapHeight: hasCapsOrDigits && bottoms.count >= 4,
+            appearsBold: appearsBold
         )
     }
 }
