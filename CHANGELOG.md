@@ -3,6 +3,12 @@
 La version de SimpleVector vit à un seul endroit : `VERSION` dans `Scripts/bundle.sh` (G110).
 Correctif : `x.y.Z` ; fonction : `x.Y.0` ; rupture : `X.0.0`.
 
+## 0.2.2 — 2026-10-27
+
+- **Redimensionnement strictement proportionnel des signatures et des tampons** (`CanvasViewportView`, `InspectorView`) :
+  - **Poignées de coin sur le canevas** : les signatures (`.signature`) et les tampons (`.stamp`) conservent désormais systématiquement leur ratio largeur/hauteur d'origine lors du redimensionnement par les poignées d'angle, y compris lorsque l'élément est incliné/tourné (le coin opposé reste ancré dans le repère de la page).
+  - **Curseur de taille proportionnelle dans l'inspecteur** : ajout d'un curseur **Taille** (`36 … 420 pt`) dans la section **Géométrie, Rotation & Ordre** pour agrandir ou réduire une signature ou un tampon de manière homothétique autour de son centre.
+
 ## 0.2.1 — 2026-10-27
 
 - **Retrait total de toute signature ou mention pré-embarquée au nom d'Adrien Mondot / cie Adrien M** (`VectorDocument`, `VectorOperations`, `VectorController`, `InspectorView`, `SVGCodec`, `HeadlessCLI`) :

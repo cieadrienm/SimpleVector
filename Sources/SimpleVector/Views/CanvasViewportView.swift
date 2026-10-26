@@ -801,20 +801,89 @@ struct CanvasViewportView: View {
 
                     let dx = currentPagePt.x - startPage.x
                     let dy = currentPagePt.y - startPage.y
-                    if let hIdx = resizingHandleIndex, let initFrame = resizingInitialFrame, let selID = ctrl.primarySelectedElement?.id {
-                        var newFrame = initFrame
+                    if let hIdx = resizingHandleIndex,
+                       let initFrame = resizingInitialFrame,
+                       let sel = ctrl.primarySelectedElement {
+                        let selID = sel.id
+                        let negRad = -sel.rotationDegrees * .pi / 180.0
+                        let localDX = dx * cos(negRad) - dy * sin(negRad)
+                        let localDY = dx * sin(negRad) + dy * cos(negRad)
+
+                        let rawW: Double
+                        let rawH: Double
                         switch hIdx {
                         case 0: // top-left
-                            newFrame = VectorRect(x: initFrame.x + dx, y: initFrame.y + dy, width: max(14, initFrame.width - dx), height: max(12, initFrame.height - dy))
+                            rawW = max(14, initFrame.width - localDX)
+                            rawH = max(12, initFrame.height - localDY)
                         case 1: // top-right
-                            newFrame = VectorRect(x: initFrame.x, y: initFrame.y + dy, width: max(14, initFrame.width + dx), height: max(12, initFrame.height - dy))
+                            rawW = max(14, initFrame.width + localDX)
+                            rawH = max(12, initFrame.height - localDY)
                         case 2: // bottom-right
-                            newFrame = VectorRect(x: initFrame.x, y: initFrame.y, width: max(14, initFrame.width + dx), height: max(12, initFrame.height + dy))
+                            rawW = max(14, initFrame.width + localDX)
+                            rawH = max(12, initFrame.height + localDY)
                         case 3: // bottom-left
-                            newFrame = VectorRect(x: initFrame.x + dx, y: initFrame.y, width: max(14, initFrame.width - dx), height: max(12, initFrame.height + dy))
+                            rawW = max(14, initFrame.width - localDX)
+                            rawH = max(12, initFrame.height + localDY)
                         default:
-                            break
+                            rawW = initFrame.width
+                            rawH = initFrame.height
                         }
+
+                        // Signatures and stamps are ALWAYS resized proportionally (and any other element when Shift is held)
+                        let isSignatureOrStamp: Bool
+                        switch sel.kind {
+                        case .signature, .stamp:
+                            isSignatureOrStamp = true
+                        default:
+                            isSignatureOrStamp = false
+                        }
+                        let lockAspect = isSignatureOrStamp || NSEvent.modifierFlags.contains(.shift)
+
+                        let finalW: Double
+                        let finalH: Double
+                        if lockAspect {
+                            let aspect = max(0.05, initFrame.width / max(1.0, initFrame.height))
+                            let scaleX = rawW / max(1.0, initFrame.width)
+                            let scaleY = rawH / max(1.0, initFrame.height)
+                            let scale = max(0.12, abs(scaleX - 1.0) >= abs(scaleY - 1.0) ? scaleX : scaleY)
+                            finalW = max(16.0, initFrame.width * scale)
+                            finalH = max(12.0, finalW / aspect)
+                        } else {
+                            finalW = rawW
+                            finalH = rawH
+                        }
+
+                        // Keep the opposite corner pinned in page space even when the element is rotated
+                        let cxOff: Double
+                        let cyOff: Double
+                        switch hIdx {
+                        case 0: // top-left dragged -> bottom-right pinned
+                            cxOff = (initFrame.width - finalW) * 0.5
+                            cyOff = (initFrame.height - finalH) * 0.5
+                        case 1: // top-right dragged -> bottom-left pinned
+                            cxOff = (finalW - initFrame.width) * 0.5
+                            cyOff = (initFrame.height - finalH) * 0.5
+                        case 2: // bottom-right dragged -> top-left pinned
+                            cxOff = (finalW - initFrame.width) * 0.5
+                            cyOff = (finalH - initFrame.height) * 0.5
+                        case 3: // bottom-left dragged -> top-right pinned
+                            cxOff = (initFrame.width - finalW) * 0.5
+                            cyOff = (finalH - initFrame.height) * 0.5
+                        default:
+                            cxOff = 0
+                            cyOff = 0
+                        }
+                        let posRad = sel.rotationDegrees * .pi / 180.0
+                        let pageCXOff = cxOff * cos(posRad) - cyOff * sin(posRad)
+                        let pageCYOff = cxOff * sin(posRad) + cyOff * cos(posRad)
+                        let newMidX = initFrame.midX + pageCXOff
+                        let newMidY = initFrame.midY + pageCYOff
+                        let newFrame = VectorRect(
+                            x: newMidX - finalW * 0.5,
+                            y: newMidY - finalH * 0.5,
+                            width: finalW,
+                            height: finalH
+                        )
                         VectorOperations.updateElement(id: selID, onPage: ctrl.currentPageIndex, in: &ctrl.document) { el in
                             el.frame = newFrame
                         }

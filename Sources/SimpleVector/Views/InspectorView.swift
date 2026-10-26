@@ -138,6 +138,12 @@ struct InspectorView: View {
                 coordBadge(label: "H", value: Int(round(el.frame.height)))
             }
 
+            if case .signature = el.kind {
+                proportionalSizeSlider(for: el)
+            } else if case .stamp = el.kind {
+                proportionalSizeSlider(for: el)
+            }
+
             VStack(alignment: .leading, spacing: 5) {
                 HStack(spacing: 8) {
                     Text(L("Rotation", "Angle"))
@@ -826,6 +832,37 @@ struct InspectorView: View {
         .padding(.vertical, 3.5)
         .frame(maxWidth: .infinity)
         .background(RoundedRectangle(cornerRadius: 4).fill(Color.white.opacity(0.05)))
+    }
+
+    private func proportionalSizeSlider(for el: VectorElement) -> some View {
+        let ctrl = model.controller
+        return HStack(spacing: 8) {
+            Text(L("Taille", "Size"))
+                .font(.system(size: 11))
+                .foregroundStyle(Theme.textDim.swiftUI)
+                .frame(width: 52, alignment: .leading)
+            Slider(
+                value: Binding(
+                    get: { el.frame.width },
+                    set: { newW in
+                        VectorOperations.updateElement(id: el.id, onPage: ctrl.currentPageIndex, in: &ctrl.document) { item in
+                            let aspect = max(0.05, item.frame.width / max(1.0, item.frame.height))
+                            let w = max(24.0, newW)
+                            let h = max(12.0, w / aspect)
+                            let midX = item.frame.midX
+                            let midY = item.frame.midY
+                            item.frame = VectorRect(x: midX - w * 0.5, y: midY - h * 0.5, width: w, height: h)
+                        }
+                    }
+                ),
+                in: 36...420
+            )
+            .tint(Theme.accent.swiftUI)
+            Text("\(Int(round(el.frame.width))) pt")
+                .font(.system(size: 10.5, design: .monospaced))
+                .foregroundStyle(Theme.text.swiftUI)
+                .frame(width: 42, alignment: .trailing)
+        }
     }
 }
 
