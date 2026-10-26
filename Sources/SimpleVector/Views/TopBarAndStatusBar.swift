@@ -165,10 +165,6 @@ struct TopBar: View {
                     }
                 }
             }
-            Divider()
-            Button(L("Charger le document de démonstration (3 pages PDF + SVG)", "Load Demo Document (3 pages PDF + SVG)")) {
-                model.controller.loadDemoDocument()
-            }
         } label: {
             Image(systemName: "seal")
                 .font(.system(size: 12, weight: .medium))
@@ -179,7 +175,7 @@ struct TopBar: View {
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
-        .help(L("Tampons d'approbation, bibliothèque de signatures et document démo (K)", "Approval stamps, signature library, and demo document (K)"))
+        .help(L("Tampons d'approbation et bibliothèque de signatures (K)", "Approval stamps and signature library (K)"))
     }
 
     private var displayModePicker: some View {

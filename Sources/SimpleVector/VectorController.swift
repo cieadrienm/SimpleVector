@@ -63,7 +63,14 @@ final class VectorController {
 
     init(startServices: Bool = true, persistEnabled: Bool = true) {
         self.persistEnabled = persistEnabled
-        let initialDoc = SyntheticDocument.makeStageContractAndPlot()
+        let size = PageFormatPreset.a4Portrait.sizePoints
+        let initialPage = VectorPage(title: "Page 1", width: size.width, height: size.height, backgroundColorHex: "#FFFFFF")
+        let initialDoc = VectorDocument(
+            title: L("Sans titre", "Untitled"),
+            sourceFormat: .svg,
+            fileURL: nil,
+            pages: [initialPage]
+        )
         self.document = initialDoc
         let loadedSignatures: [SignaturePreset]
         if persistEnabled,
@@ -77,8 +84,8 @@ final class VectorController {
         self.signatures = loadedSignatures
         self.activeSignaturePresetID = loadedSignatures.first?.id ?? UUID()
         self.statusMessage = L(
-            "Prêt · \(initialDoc.pages.count) pages · \(initialDoc.pdfTextElementCount) blocs PDF éditables",
-            "Ready · \(initialDoc.pages.count) pages · \(initialDoc.pdfTextElementCount) editable PDF blocks"
+            "Prêt · Ouvrir un document PDF ou SVG (⌘O) ou dessiner sur la page A4",
+            "Ready · Open a PDF or SVG document (⌘O) or draw on the A4 page"
         )
 
         if startServices {
@@ -176,18 +183,6 @@ final class VectorController {
         selection.removeAll()
         lastError = nil
         statusMessage = L("Nouveau document \(preset.rawValue) créé", "New \(preset.rawValue) document created")
-    }
-
-    func loadDemoDocument() {
-        document = SyntheticDocument.makeStageContractAndPlot()
-        history.clear()
-        currentPageIndex = 0
-        selection.removeAll()
-        lastError = nil
-        statusMessage = L(
-            "Démo chargée : Contrat PDF éditable + Plan de feu SVG (3 pages)",
-            "Demo loaded: Editable PDF Contract + SVG Stage Plot (3 pages)"
-        )
     }
 
     func openFile(at url: URL) throws {
@@ -667,7 +662,7 @@ final class VectorController {
                     "GET /v1/help",
                     "GET /v1/svg",
                     "GET /v1/snapshot.png?view=single|multipage|grid",
-                    "POST /v1/open {\"path\":\"/path/to/file.pdf\",\"demo\":true}",
+                    "POST /v1/open {\"path\":\"/path/to/file.pdf\"}",
                     "POST /v1/text {\"page\":1,\"match\":\"Statut\",\"text\":\"Statut : VALIDÉ\"}",
                     "POST /v1/sign {\"page\":1,\"signer\":\"Adrien Mondot\",\"x\":420,\"y\":695,\"stamp\":\"approved\"}",
                     "POST /v1/page {\"format\":\"A4 Portrait\",\"duplicate\":false}",
@@ -711,10 +706,7 @@ final class VectorController {
             }
 
         case ("POST", "/v1/open"):
-            if (args["demo"] as? Bool) == true {
-                loadDemoDocument()
-                writeJSON(["ok": true, "pages": document.pages.count])
-            } else if let path = args["path"] as? String, !path.isEmpty {
+            if let path = args["path"] as? String, !path.isEmpty {
                 let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
                 do {
                     try openFile(at: url)
@@ -725,7 +717,7 @@ final class VectorController {
                 }
             } else {
                 statusBox.set(400)
-                writeJSON(["ok": false, "error": "missing 'path' or 'demo'"])
+                writeJSON(["ok": false, "error": "missing 'path'"])
             }
 
         case ("POST", "/v1/text"):

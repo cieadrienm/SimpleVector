@@ -112,9 +112,12 @@ final class AppModel {
     }
 
     private static let defaultsPrefix = "net.cieadrienm.simplevector."
+    private static let recentPathsKey = "net.cieadrienm.simplevector.recentPaths"
+    private let persistEnabled: Bool
 
     let controller: VectorController
     let updater: SimpleUpdater
+    var recentURLs: [URL] = []
 
     var language: AppLanguage {
         didSet { Localization.current = language }
@@ -151,6 +154,7 @@ final class AppModel {
     private var keyMonitor: Any? = nil
 
     init(startServices: Bool = true, persistEnabled: Bool = true) {
+        self.persistEnabled = persistEnabled
         self.language = Localization.current
         self.controller = VectorController(startServices: startServices, persistEnabled: persistEnabled)
         self.updater = SimpleUpdater(
@@ -160,6 +164,10 @@ final class AppModel {
             currentVersion: AppVersion.current.version,
             startAutoCheck: startServices
         )
+
+        if persistEnabled {
+            loadRecentURLs()
+        }
 
         let args = CommandLine.arguments
         if let idx = args.firstIndex(of: "-showPDFTextBoxes"), idx + 1 < args.count {
@@ -274,6 +282,7 @@ final class AppModel {
         do {
             try controller.openFile(at: url)
             editingTextElementID = nil
+            recordRecentURL(url)
             resetViewAnimated()
         } catch {
             alert = AlertItem(
@@ -287,6 +296,7 @@ final class AppModel {
         if let existingURL = controller.document.fileURL {
             do {
                 try controller.saveFile(to: existingURL)
+                recordRecentURL(existingURL)
                 flash(L("Enregistré dans \(existingURL.lastPathComponent)", "Saved to \(existingURL.lastPathComponent)"))
                 return
             } catch {
@@ -313,6 +323,9 @@ final class AppModel {
         if panel.runModal() == .OK, let url = panel.url {
             do {
                 try controller.saveFile(to: url, format: defaultFormat)
+                if defaultFormat == .pdf || defaultFormat == .svg {
+                    recordRecentURL(url)
+                }
                 showExportSheet = false
                 flash(L("Enregistré : \(url.lastPathComponent)", "Saved: \(url.lastPathComponent)"))
             } catch {
@@ -321,6 +334,42 @@ final class AppModel {
                     message: error.localizedDescription
                 )
             }
+        }
+    }
+
+    // MARK: - Recent Files (`Fichier > Ouvrir récent`)
+
+    func loadRecentURLs() {
+        let savedPaths = UserDefaults.standard.stringArray(forKey: Self.recentPathsKey) ?? []
+        var urls = savedPaths
+            .map { URL(fileURLWithPath: $0) }
+            .filter { FileManager.default.fileExists(atPath: $0.path) }
+        for url in NSDocumentController.shared.recentDocumentURLs where FileManager.default.fileExists(atPath: url.path) {
+            if !urls.contains(where: { $0.standardizedFileURL == url.standardizedFileURL }) {
+                urls.append(url)
+            }
+        }
+        recentURLs = Array(urls.prefix(12))
+    }
+
+    func recordRecentURL(_ url: URL) {
+        let standardized = url.standardizedFileURL
+        recentURLs.removeAll { $0.standardizedFileURL == standardized }
+        recentURLs.insert(standardized, at: 0)
+        if recentURLs.count > 12 {
+            recentURLs = Array(recentURLs.prefix(12))
+        }
+        if persistEnabled {
+            UserDefaults.standard.set(recentURLs.map(\.path), forKey: Self.recentPathsKey)
+            NSDocumentController.shared.noteNewRecentDocumentURL(standardized)
+        }
+    }
+
+    func clearRecentURLs() {
+        recentURLs.removeAll()
+        if persistEnabled {
+            UserDefaults.standard.removeObject(forKey: Self.recentPathsKey)
+            NSDocumentController.shared.clearRecentDocuments(nil)
         }
     }
 

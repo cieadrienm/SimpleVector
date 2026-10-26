@@ -3,6 +3,11 @@
 La version de SimpleVector vit à un seul endroit : `VERSION` dans `Scripts/bundle.sh` (G110).
 Correctif : `x.y.Z` ; fonction : `x.Y.0` ; rupture : `X.0.0`.
 
+## 0.1.2 — 2026-10-26
+
+- **Menu `Fichier > Ouvrir récent` (`Open Recent`)** (`SimpleVectorApp`, `AppModel`) : ajout du sous-menu listant jusqu'à 12 documents `.pdf` ou `.svg` récemment ouverts ou enregistrés, synchronisé avec `NSDocumentController.shared` et `UserDefaults`, avec action **Effacer le menu**.
+- **Démarrage sur document A4 vierge sans fichier démo** (`VectorController`, `SimpleVectorApp`, `TopBarAndStatusBar`) : lancement direct sur une page A4 Portrait vierge (`Sans titre`) et retrait des entrées « Charger la démo » des menus et de la barre d'outils (le générateur synthétique reste strictement réservé aux tests automatisés `--self-test`).
+
 ## 0.1.1 — 2026-10-26
 
 - **Fidélité typographique et masquage sans artefact lors de l'édition de texte PDF** (`PDFCodec`, `PDFPageBitmapAnalyzer`, `CanvasViewportView`, `InspectorView`) :

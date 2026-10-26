@@ -35,6 +35,11 @@ Journal des choix structurants : contexte, décision, ce qui a été écarté. T
   - **Contexte** : SimpleVector s'intègre à l'écosystème de régie de la cie Adrien M (API HTTP JSON `/v1`, serveur MCP `simplevector-mcp` embarqué dans `Contents/MacOS/` et pilotage OSC).
   - **Décision** : Attribution du créneau `x = 6` dans `SimpleFamily/GUIDELINES.md` (G92).
 
+- **D7 — Démarrage sur page A4 vierge sans fichier démo et menu `Fichier > Ouvrir récent` (`0.1.2`).**
+  - **Contexte** : Préférence explicite d'Adrien de ne pas pré-charger ni proposer de fichier de démonstration dans l'interface, et de disposer du sous-menu standard `Fichier > Ouvrir récent`.
+  - **Décision** : `VectorController` s'initialise sur une page A4 Portrait vierge (`Sans titre`), toutes les entrées UI de démo sont retirées (`SyntheticDocument` est conservé uniquement pour `--self-test`), et `AppModel` maintient `recentURLs` (jusqu'à 12 fichiers existants, synchronisés avec `NSDocumentController.shared` et persistés dans `UserDefaults`).
+  - **Écarté** : Pré-chargement d'un contrat PDF + plan SVG de démonstration au démarrage.
+
 ---
 
 ## Remis à plus tard

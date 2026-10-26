@@ -46,16 +46,30 @@ struct SimpleVectorApp: App {
             }
             .keyboardShortcut("n", modifiers: [.command, .shift])
 
-            Button(L("Charger la démo (Contrat PDF + Plan SVG)", "Load Demo (PDF Contract + SVG Plot)")) {
-                ctrl.loadDemoDocument()
-            }
-
             Divider()
 
             Button(L("Ouvrir un document SVG ou PDF…", "Open SVG or PDF Document…")) {
                 model.openDocumentPanel()
             }
             .keyboardShortcut("o", modifiers: [.command])
+
+            Menu(L("Ouvrir récent", "Open Recent")) {
+                if model.recentURLs.isEmpty {
+                    Text(L("Aucun élément récent", "No Recent Items"))
+                } else {
+                    ForEach(model.recentURLs, id: \.path) { url in
+                        Button(url.lastPathComponent) {
+                            model.open(url)
+                        }
+                    }
+                    Divider()
+                    Button(L("Effacer le menu", "Clear Menu")) {
+                        model.clearRecentURLs()
+                    }
+                }
+            }
+
+            Divider()
 
             Button(L("Enregistrer le document…", "Save Document…")) {
                 model.saveDocumentDirectOrPanel()

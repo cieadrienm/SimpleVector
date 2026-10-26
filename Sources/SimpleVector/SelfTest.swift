@@ -31,11 +31,13 @@ enum SelfTest {
             check("Import 2-page PDF document", false)
         }
 
-        // 2. Controller & PDF text editing + vector masking + Undo/Redo
+        // 2. Controller initial blank page + PDF text editing + vector masking + Undo/Redo
         let model = AppModel(startServices: false, persistEnabled: false)
         let ctrl = model.controller
-        check("Demo document has 3 pages (2 PDF + 1 SVG plot)", ctrl.document.pages.count == 3)
-        check("Demo document has modified PDF text with active mask", ctrl.document.modifiedPDFTextCount >= 1 && !ctrl.currentPage.activeMaskRects.isEmpty)
+        check("Initial document starts with a single blank A4 page", ctrl.document.pages.count == 1 && ctrl.document.totalElementsCount == 0)
+        ctrl.document = SyntheticDocument.makeStageContractAndPlot()
+        check("Synthetic test document has 3 pages (2 PDF + 1 SVG plot)", ctrl.document.pages.count == 3)
+        check("Synthetic test document has modified PDF text with active mask", ctrl.document.modifiedPDFTextCount >= 1 && !ctrl.currentPage.activeMaskRects.isEmpty)
 
         let beforeSigCount = ctrl.document.signatureCount
         ctrl.stampActiveSignature(at: VectorPoint(x: 300, y: 500))

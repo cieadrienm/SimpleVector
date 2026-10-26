@@ -7,12 +7,13 @@ import Testing
 @Suite("SimpleVectorApp & MCP Tests")
 struct SimpleVectorAppTests {
 
-    @Test("AppModel & VectorController editing and MCP server tools")
+    @Test("AppModel & VectorController editing, Open Recent, and MCP server tools")
     @MainActor
     func testControllerAndMCP() throws {
         let model = AppModel(startServices: false, persistEnabled: false)
         let ctrl = model.controller
-        #expect(ctrl.document.pages.count == 3)
+        #expect(ctrl.document.pages.count == 1)
+        #expect(ctrl.document.totalElementsCount == 0)
 
         let initialCount = ctrl.currentPage.elements.count
         ctrl.stampActiveSignature()
@@ -20,6 +21,13 @@ struct SimpleVectorAppTests {
 
         ctrl.undo()
         #expect(ctrl.currentPage.elements.count == initialCount)
+
+        // Verify Open Recent list recording and clearing
+        let dummyURL = URL(fileURLWithPath: "/tmp/test-simplevector.pdf")
+        model.recordRecentURL(dummyURL)
+        #expect(model.recentURLs.first?.standardizedFileURL == dummyURL.standardizedFileURL)
+        model.clearRecentURLs()
+        #expect(model.recentURLs.isEmpty)
 
         // Verify MCP Server tool listing
         let mcp = SimpleVectorMCPServer(transport: { _, _, _ in
