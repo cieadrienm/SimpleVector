@@ -3,6 +3,14 @@
 La version de SimpleVector vit à un seul endroit : `VERSION` dans `Scripts/bundle.sh` (G110).
 Correctif : `x.y.Z` ; fonction : `x.Y.0` ; rupture : `X.0.0`.
 
+## 0.1.5 — 2026-10-26
+
+- **Extraction et enregistrement direct des polices embarquées dans le PDF (`PDFEmbeddedFontRegistry`)** (`PDFCodec`, `CanvasViewportView`, `InspectorView`) :
+  - **Pourquoi la police changeait auparavant** : PDFKit utilise les flux binaires `/FontFile`, `/FontFile2` (TrueType) et `/FontFile3` (CFF/OpenType) embarqués dans le PDF pour dessiner la page originale, mais ne les enregistre pas dans `CTFontManager` sur macOS. Lorsque `PDFSelection.attributedString` ou `CTFontCreateWithName` cherchait une police absente du système (`Poppins-Medium`, `LEMONMILK-Bold`, `DMSerifDisplay-Regular`, `Calibri`…), macOS la remplaçait silencieusement par `Helvetica`.
+  - **Extraction binaire `CGPDFDocument` avant `PDFSelection`** : avant d'analyser le texte, `PDFEmbeddedFontRegistry.shared.registerFonts(fromPDFData:)` parcourt les dictionnaires `/Resources -> /Font` (et les `Form XObjects`) de toutes les pages, extrait les flux `/FontFile2`, `/FontFile3` et `/FontFile`, retire sur place les préfixes de sous-ensemble `ABCDEF+` dans la table TrueType `name`, fusionne la table `/ToUnicode` dans une sous-table `cmap` Format 4 lorsque nécessaire, et enregistre la police dans le processus via `CTFontManagerRegisterFontsForURL`.
+  - **Auto-complétion de l'alphabet complet (`~/Library/Application Support/SimpleVector/Fonts/`)** : lorsqu'un PDF n'embarque qu'un sous-jeu partiel (*subset*) d'une police ouverte (`Poppins`, `DM Serif Display`, `Montserrat`, `Roboto`, `Open Sans`, `Lato`, `Inter`, etc., où certaines lettres non utilisées dans le document initial manquent au sous-jeu), `PDFEmbeddedFontRegistry` récupère et met en cache localement le fichier `.ttf` complet (`100 %` des glyphes et accents).
+  - **Synthèse vectorielle d'accents sur les sous-jeux propriétaires hors-ligne (`adaptStringForSubsetFont`)** : si une police propriétaire embarquée en sous-jeu (p. ex. `LEMONMILK-Bold`) ne contient pas une voyelle précomposée accentuée (`É`) mais contient la lettre de base (`E`), SimpleVector trace le `E` avec la vraie police embarquée du PDF et dessine l'accent vectoriel correspondant au-dessus du glyphe au lieu de retomber sur `Helvetica`.
+
 ## 0.1.4 — 2026-10-26
 
 - **Segmentation verticale universelle par bandes d'encre (`PDFPageBitmapAnalyzer.analyzeTextRegion`) et fidélité multi-logiciels (Canva, Illustrator, InDesign, Word, LibreOffice)** :

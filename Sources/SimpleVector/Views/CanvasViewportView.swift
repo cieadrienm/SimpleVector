@@ -508,10 +508,12 @@ struct CanvasViewportView: View {
             let lineH = CGFloat(t.fontSize * 1.25) * geom.scale
             let lines = t.text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
             for (idx, lineStr) in lines.enumerated() where !lineStr.isEmpty {
-                let txt = Text(lineStr)
+                let (adaptedStr, accents) = PDFCodec.adaptStringForSubsetFont(lineStr, ctFont: unscaledFont, kern: t.letterSpacing)
+                let textColor = Color(red: tc.r, green: tc.g, blue: tc.b, opacity: el.style.opacity)
+                let txt = Text(adaptedStr)
                     .font(Font(ctFont))
                     .tracking(CGFloat(t.letterSpacing) * geom.scale)
-                    .foregroundStyle(Color(red: tc.r, green: tc.g, blue: tc.b, opacity: el.style.opacity))
+                    .foregroundStyle(textColor)
                 let paneBaselineY = paneRect.minY + CGFloat(firstBaselineOffset) * geom.scale + CGFloat(idx) * lineH
                 let drawTopY = paneBaselineY - ascent
                 let anchorPt: CGPoint
@@ -528,6 +530,37 @@ struct CanvasViewportView: View {
                     unitAnchor = .topTrailing
                 }
                 layer.draw(txt, at: anchorPt, anchor: unitAnchor)
+
+                if !accents.isEmpty {
+                    var accentPath = Path()
+                    for acc in accents {
+                        let cx = paneRect.minX + CGFloat(acc.centerX) * geom.scale
+                        let topY = paneBaselineY + CGFloat(acc.capTopY) * geom.scale
+                        let ch = CGFloat(acc.capHeight) * geom.scale
+                        switch acc.kind {
+                        case .acute:
+                            accentPath.move(to: CGPoint(x: cx - ch * 0.05, y: topY - ch * 0.08))
+                            accentPath.addLine(to: CGPoint(x: cx + ch * 0.12, y: topY - ch * 0.23))
+                        case .grave:
+                            accentPath.move(to: CGPoint(x: cx + ch * 0.05, y: topY - ch * 0.08))
+                            accentPath.addLine(to: CGPoint(x: cx - ch * 0.12, y: topY - ch * 0.23))
+                        case .circumflex:
+                            accentPath.move(to: CGPoint(x: cx - ch * 0.13, y: topY - ch * 0.08))
+                            accentPath.addLine(to: CGPoint(x: cx, y: topY - ch * 0.22))
+                            accentPath.addLine(to: CGPoint(x: cx + ch * 0.13, y: topY - ch * 0.08))
+                        case .diaeresis:
+                            let r = max(0.8, ch * 0.08)
+                            accentPath.addEllipse(in: CGRect(x: cx - ch * 0.11 - r, y: topY - ch * 0.16 - r, width: r * 2, height: r * 2))
+                            accentPath.addEllipse(in: CGRect(x: cx + ch * 0.11 - r, y: topY - ch * 0.16 - r, width: r * 2, height: r * 2))
+                        case .cedilla:
+                            accentPath.move(to: CGPoint(x: cx, y: paneBaselineY))
+                            accentPath.addLine(to: CGPoint(x: cx - ch * 0.03, y: paneBaselineY + ch * 0.12))
+                            accentPath.addLine(to: CGPoint(x: cx + ch * 0.06, y: paneBaselineY + ch * 0.20))
+                        }
+                    }
+                    let strokeW = max(1.0, CGFloat(t.fontSize * 0.09) * geom.scale)
+                    layer.stroke(accentPath, with: .color(textColor), style: StrokeStyle(lineWidth: strokeW, lineCap: .round, lineJoin: .round))
+                }
             }
 
         case .stamp(let st):

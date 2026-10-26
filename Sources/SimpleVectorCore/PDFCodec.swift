@@ -12,6 +12,10 @@ public enum PDFCodec {
     // MARK: - Import PDF & Extract Editable Text Blocks
 
     public static func importPDF(data: Data, title: String = "Document PDF", fileURL: URL? = nil) throws -> VectorDocument {
+        // Register all embedded PDF fonts (and auto-complete subset open fonts) BEFORE PDFDocument/PDFSelection
+        // parses attributed strings so PDFKit resolves the exact original fonts instead of falling back to Helvetica.
+        PDFEmbeddedFontRegistry.shared.registerFonts(fromPDFData: data)
+
         guard let pdfDoc = PDFDocument(data: data), pdfDoc.pageCount > 0 else {
             throw NSError(domain: "PDFCodec", code: 1, userInfo: [
                 NSLocalizedDescriptionKey: L("Fichier PDF invalide ou vide.", "Invalid or empty PDF file.")
@@ -261,9 +265,9 @@ public enum PDFCodec {
         let pdfTypographicalBaselineY = selTopY + ascent
         let baselineOffset: Double
         if let metrics = bitmapMetrics {
-            let bitmapBaselineY = metrics.baselineY + 0.20
+            let bitmapBaselineY = metrics.baselineY
             let chosenBaselineY: Double
-            if attrInfo.hadExplicitFont && abs(pdfTypographicalBaselineY - bitmapBaselineY) <= 1.4 {
+            if attrInfo.hadExplicitFont && abs(pdfTypographicalBaselineY - bitmapBaselineY) <= 1.2 {
                 chosenBaselineY = pdfTypographicalBaselineY
             } else {
                 chosenBaselineY = bitmapBaselineY
@@ -440,6 +444,18 @@ public enum PDFCodec {
 
     private static func normalizeFontFamilyName(family: String, postScript: String) -> String {
         let candidate = family.isEmpty ? postScript : family
+        // If this exact font (or embedded PDF font) is registered in the process, preserve its real family name!
+        if PDFEmbeddedFontRegistry.shared.hasRegisteredFont(postScriptName: postScript, familyName: candidate) {
+            return candidate.isEmpty ? postScript : candidate
+        }
+        if !postScript.isEmpty {
+            let probe = CTFontCreateWithName(postScript as CFString, 12.0, nil)
+            let actualPS = (CTFontCopyPostScriptName(probe) as String).lowercased()
+            if actualPS == postScript.lowercased() {
+                let fam = CTFontCopyFamilyName(probe) as String
+                if !fam.isEmpty { return fam }
+            }
+        }
         let lower = candidate.lowercased()
         if lower.contains("arial") || lower.contains("liberation sans") || lower.contains("liberationsans") || lower.contains("arimo") {
             return "Arial"
@@ -486,7 +502,7 @@ public enum PDFCodec {
     // MARK: - Unified Font Resolver & Metrics (`PDFCodec` + `CanvasViewportView`)
 
     /// Resolves the exact `CTFont` for a `TextPayload` at a requested point size, preserving PDF PostScript names,
-    /// font families, and bold/italic symbolic traits.
+    /// embedded PDF fonts, completed Google Fonts, font families, and bold/italic symbolic traits.
     public static func resolveCTFont(for payload: TextPayload, size: CGFloat) -> CTFont {
         let clampedSize = max(4.0, size)
         var requestedTraits: CTFontSymbolicTraits = []
@@ -497,23 +513,53 @@ public enum PDFCodec {
         if let psName = payload.postScriptFontName, !psName.isEmpty,
            payload.isBold == (payload.originalIsBold ?? payload.isBold),
            payload.isItalic == (payload.originalIsItalic ?? payload.isItalic) {
+            if let regFont = PDFEmbeddedFontRegistry.shared.makeCTFont(
+                postScriptName: psName,
+                familyName: payload.fontFamily,
+                size: clampedSize,
+                isBold: payload.isBold,
+                isItalic: payload.isItalic
+            ) {
+                return regFont
+            }
             let direct = CTFontCreateWithName(psName as CFString, clampedSize, nil)
             let actualPS = (CTFontCopyPostScriptName(direct) as String).lowercased()
             let reqLower = psName.lowercased()
             if actualPS == reqLower || actualPS.hasPrefix(reqLower.prefix(5)) {
-                return direct
+                return PDFEmbeddedFontRegistry.withMatchingCascadeFallback(
+                    direct,
+                    size: clampedSize,
+                    isBold: payload.isBold,
+                    isItalic: payload.isItalic
+                )
             }
         }
 
-        // 2. Create from family name and apply requested bold/italic symbolic traits
+        // 2. Check embedded/completed registry by family name
+        if !payload.fontFamily.isEmpty,
+           let regFamFont = PDFEmbeddedFontRegistry.shared.makeCTFont(
+               postScriptName: payload.postScriptFontName,
+               familyName: payload.fontFamily,
+               size: clampedSize,
+               isBold: payload.isBold,
+               isItalic: payload.isItalic
+           ) {
+            return regFamFont
+        }
+
+        // 3. Create from family name and apply requested bold/italic symbolic traits
         let family = payload.fontFamily.isEmpty ? "Helvetica Neue" : payload.fontFamily
         let baseFont = CTFontCreateWithName(family as CFString, clampedSize, nil)
         if !requestedTraits.isEmpty,
            let traited = CTFontCreateCopyWithSymbolicTraits(baseFont, clampedSize, nil, requestedTraits, [.boldTrait, .italicTrait]) {
             return traited
         }
+        let actualFam = (CTFontCopyFamilyName(baseFont) as String).lowercased()
+        if actualFam == family.lowercased() {
+            return baseFont
+        }
 
-        // 3. Explicit PostScript fallback for Helvetica Neue
+        // 4. Explicit PostScript fallback for Helvetica Neue
         let fallbackName: String
         if payload.isBold && payload.isItalic {
             fallbackName = "HelveticaNeue-BoldItalic"
@@ -912,6 +958,141 @@ public enum PDFCodec {
         ctx.restoreGState()
     }
 
+    public enum SyntheticAccentKind: Sendable {
+        case acute
+        case grave
+        case circumflex
+        case diaeresis
+        case cedilla
+    }
+
+    public struct SyntheticAccentPlacement: Sendable {
+        public let centerX: Double
+        public let capTopY: Double
+        public let baselineY: Double
+        public let capHeight: Double
+        public let kind: SyntheticAccentKind
+    }
+
+    /// Adapts a string for rendering with `ctFont` when `ctFont` is an embedded PDF subset font:
+    /// - If all characters have native glyphs in `ctFont` (true for system fonts and completed Google Fonts),
+    ///   returns `(string, [])` with zero modifications.
+    /// - If a character is missing (`glyph == 0`) in a subset font, checks if uppercase folding (for all-caps fonts)
+    ///   or base-letter decomposition (`É` -> `E` + acute accent) allows rendering the character body in the exact
+    ///   embedded PDF font instead of falling back to Helvetica.
+    public static func adaptStringForSubsetFont(
+        _ string: String,
+        ctFont: CTFont,
+        kern: Double = 0.0
+    ) -> (adaptedString: String, accents: [SyntheticAccentPlacement]) {
+        guard !string.isEmpty else { return (string, []) }
+        let utf16 = Array(string.utf16)
+        var glyphs = [CGGlyph](repeating: 0, count: utf16.count)
+        if CTFontGetGlyphsForCharacters(ctFont, utf16, &glyphs, utf16.count) {
+            return (string, [])
+        }
+
+        // Check if this is an all-caps display subset font (has uppercase A/E/I/O/R/S/T but no lowercase a/e/i/o)
+        let lowerProbe: [UniChar] = [0x61, 0x65, 0x69, 0x6F]
+        var lowerGlyphs = [CGGlyph](repeating: 0, count: lowerProbe.count)
+        _ = CTFontGetGlyphsForCharacters(ctFont, lowerProbe, &lowerGlyphs, lowerProbe.count)
+        let upperProbe: [UniChar] = [0x41, 0x45, 0x49, 0x4F]
+        var upperGlyphs = [CGGlyph](repeating: 0, count: upperProbe.count)
+        _ = CTFontGetGlyphsForCharacters(ctFont, upperProbe, &upperGlyphs, upperProbe.count)
+        let isAllCapsSubset = lowerGlyphs.allSatisfy({ $0 == 0 }) && upperGlyphs.contains(where: { $0 != 0 })
+
+        let accentTable: [Character: (base: Character, kind: SyntheticAccentKind)] = [
+            "É": ("E", .acute), "È": ("E", .grave), "Ê": ("E", .circumflex), "Ë": ("E", .diaeresis),
+            "À": ("A", .grave), "Â": ("A", .circumflex), "Ä": ("A", .diaeresis),
+            "Ù": ("U", .grave), "Û": ("U", .circumflex), "Ü": ("U", .diaeresis),
+            "Î": ("I", .circumflex), "Ï": ("I", .diaeresis),
+            "Ô": ("O", .circumflex), "Ö": ("O", .diaeresis),
+            "Ç": ("C", .cedilla),
+            "é": ("e", .acute), "è": ("e", .grave), "ê": ("e", .circumflex), "ë": ("e", .diaeresis),
+            "à": ("a", .grave), "â": ("a", .circumflex), "ä": ("a", .diaeresis),
+            "ù": ("u", .grave), "û": ("u", .circumflex), "ü": ("u", .diaeresis),
+            "î": ("i", .circumflex), "ï": ("i", .diaeresis),
+            "ô": ("o", .circumflex), "ö": ("o", .diaeresis),
+            "ç": ("c", .cedilla),
+        ]
+
+        func hasGlyph(_ ch: Character) -> Bool {
+            let u = Array(String(ch).utf16)
+            var g = [CGGlyph](repeating: 0, count: u.count)
+            return CTFontGetGlyphsForCharacters(ctFont, u, &g, u.count) && g.allSatisfy { $0 != 0 }
+        }
+
+        var outChars: [Character] = []
+        var pendingAccents: [(utf16Offset: Int, utf16Len: Int, kind: SyntheticAccentKind, isUpper: Bool)] = []
+        var currentUTF16Offset = 0
+
+        for ch in string {
+            if hasGlyph(ch) {
+                outChars.append(ch)
+                currentUTF16Offset += String(ch).utf16.count
+                continue
+            }
+            // Try uppercase if all-caps subset font
+            if isAllCapsSubset, let up = ch.uppercased().first, up != ch {
+                if hasGlyph(up) {
+                    outChars.append(up)
+                    currentUTF16Offset += String(up).utf16.count
+                    continue
+                }
+                if let entry = accentTable[up], hasGlyph(entry.base) {
+                    let len = String(entry.base).utf16.count
+                    pendingAccents.append((currentUTF16Offset, len, entry.kind, true))
+                    outChars.append(entry.base)
+                    currentUTF16Offset += len
+                    continue
+                }
+            }
+            // Try decomposing accented character into base letter + synthetic accent
+            if let entry = accentTable[ch] {
+                let candidateBase: Character = (isAllCapsSubset ? (entry.base.uppercased().first ?? entry.base) : entry.base)
+                if hasGlyph(candidateBase) {
+                    let len = String(candidateBase).utf16.count
+                    pendingAccents.append((currentUTF16Offset, len, entry.kind, candidateBase.isUppercase))
+                    outChars.append(candidateBase)
+                    currentUTF16Offset += len
+                    continue
+                }
+            }
+            outChars.append(ch)
+            currentUTF16Offset += String(ch).utf16.count
+        }
+
+        let adapted = String(outChars)
+        guard !pendingAccents.isEmpty else { return (adapted, []) }
+
+        let kernNumber = kern as CFNumber
+        let attrs: [CFString: Any] = [
+            kCTFontAttributeName: ctFont,
+            kCTKernAttributeName: kernNumber,
+        ]
+        guard let attrStr = CFAttributedStringCreate(kCFAllocatorDefault, adapted as CFString, attrs as CFDictionary) else {
+            return (adapted, [])
+        }
+        let ctLine = CTLineCreateWithAttributedString(attrStr)
+        let capH = Double(CTFontGetCapHeight(ctFont))
+        let xH = Double(CTFontGetXHeight(ctFont))
+
+        var placements: [SyntheticAccentPlacement] = []
+        for item in pendingAccents {
+            let x0 = Double(CTLineGetOffsetForStringIndex(ctLine, item.utf16Offset, nil))
+            let x1 = Double(CTLineGetOffsetForStringIndex(ctLine, item.utf16Offset + item.utf16Len, nil))
+            let glyphH = item.isUpper ? capH : (xH > 2.0 ? xH : capH * 0.72)
+            placements.append(SyntheticAccentPlacement(
+                centerX: (x0 + x1) * 0.5,
+                capTopY: -glyphH,
+                baselineY: 0.0,
+                capHeight: capH,
+                kind: item.kind
+            ))
+        }
+        return (adapted, placements)
+    }
+
     private static func drawCoreTextLine(
         _ string: String,
         at origin: CGPoint,
@@ -923,13 +1104,14 @@ public enum PDFCodec {
         in ctx: CGContext
     ) {
         guard !string.isEmpty else { return }
+        let (adaptedString, accents) = adaptStringForSubsetFont(string, ctFont: ctFont, kern: kern)
         let kernNumber = kern as CFNumber
         let attrs: [CFString: Any] = [
             kCTFontAttributeName: ctFont,
             kCTForegroundColorAttributeName: color,
             kCTKernAttributeName: kernNumber,
         ]
-        guard let attrStr = CFAttributedStringCreate(kCFAllocatorDefault, string as CFString, attrs as CFDictionary) else { return }
+        guard let attrStr = CFAttributedStringCreate(kCFAllocatorDefault, adaptedString as CFString, attrs as CFDictionary) else { return }
         let ctLine = CTLineCreateWithAttributedString(attrStr)
         let lineWidth = CTLineGetTypographicBounds(ctLine, nil, nil, nil)
 
@@ -950,6 +1132,47 @@ public enum PDFCodec {
         ctx.textPosition = .zero
         CTLineDraw(ctLine, ctx)
         ctx.restoreGState()
+
+        if !accents.isEmpty {
+            ctx.saveGState()
+            ctx.setStrokeColor(color)
+            ctx.setFillColor(color)
+            ctx.setLineCap(.round)
+            ctx.setLineJoin(.round)
+            for acc in accents {
+                let cx = drawX + CGFloat(acc.centerX)
+                let topY = origin.y + CGFloat(acc.capTopY)
+                let baseY = origin.y
+                let ch = CGFloat(acc.capHeight)
+                let strokeW = max(1.1, ch * 0.125)
+                ctx.setLineWidth(strokeW)
+                switch acc.kind {
+                case .acute:
+                    ctx.move(to: CGPoint(x: cx - ch * 0.05, y: topY - ch * 0.08))
+                    ctx.addLine(to: CGPoint(x: cx + ch * 0.12, y: topY - ch * 0.23))
+                    ctx.strokePath()
+                case .grave:
+                    ctx.move(to: CGPoint(x: cx + ch * 0.05, y: topY - ch * 0.08))
+                    ctx.addLine(to: CGPoint(x: cx - ch * 0.12, y: topY - ch * 0.23))
+                    ctx.strokePath()
+                case .circumflex:
+                    ctx.move(to: CGPoint(x: cx - ch * 0.13, y: topY - ch * 0.08))
+                    ctx.addLine(to: CGPoint(x: cx, y: topY - ch * 0.22))
+                    ctx.addLine(to: CGPoint(x: cx + ch * 0.13, y: topY - ch * 0.08))
+                    ctx.strokePath()
+                case .diaeresis:
+                    let r = strokeW * 0.65
+                    ctx.fillEllipse(in: CGRect(x: cx - ch * 0.11 - r, y: topY - ch * 0.16 - r, width: r * 2, height: r * 2))
+                    ctx.fillEllipse(in: CGRect(x: cx + ch * 0.11 - r, y: topY - ch * 0.16 - r, width: r * 2, height: r * 2))
+                case .cedilla:
+                    ctx.move(to: CGPoint(x: cx, y: baseY))
+                    ctx.addLine(to: CGPoint(x: cx - ch * 0.03, y: baseY + ch * 0.12))
+                    ctx.addLine(to: CGPoint(x: cx + ch * 0.06, y: baseY + ch * 0.20))
+                    ctx.strokePath()
+                }
+            }
+            ctx.restoreGState()
+        }
     }
 }
 
@@ -1199,6 +1422,8 @@ private final class PDFPageBitmapAnalyzer {
         let colCount = max(1, px1 - px0 + 1)
         var colMinY = [Int](repeating: Int.max, count: colCount)
         var colMaxY = [Int](repeating: Int.min, count: colCount)
+        var coreColMinY = [Int](repeating: Int.max, count: colCount)
+        var coreColMaxY = [Int](repeating: Int.min, count: colCount)
         var inkSamples: [(dist: Int, r: Int, g: Int, b: Int)] = []
         var runLengths: [Int] = []
 
@@ -1219,6 +1444,10 @@ private final class PDFPageBitmapAnalyzer {
                     let cIdx = px - px0
                     if py < colMinY[cIdx] { colMinY[cIdx] = py }
                     if py > colMaxY[cIdx] { colMaxY[cIdx] = py }
+                    if dist >= 48 {
+                        if py < coreColMinY[cIdx] { coreColMinY[cIdx] = py }
+                        if py > coreColMaxY[cIdx] { coreColMaxY[cIdx] = py }
+                    }
                     if dist >= 45 {
                         curRun += 1
                     } else if curRun > 0 {
@@ -1271,19 +1500,30 @@ private final class PDFPageBitmapAnalyzer {
             }
         }
 
-        // 4. Determine exact baselineY and capTopY from substantial glyph columns
+        // 4. Determine exact baselineY and capTopY from substantial glyph columns (preferring core glyph ink >= 48)
         let totalInkH = max(1, maxInkY - minInkY + 1)
-        let minColH = max(2, Int(Double(totalInkH) * 0.38))
+        let minColH = max(2, Int(Double(totalInkH) * 0.36))
         var bottoms: [Int] = []
         var tops: [Int] = []
         bottoms.reserveCapacity(colCount)
         tops.reserveCapacity(colCount)
 
-        for i in 0..<colCount where colMinY[i] <= colMaxY[i] {
-            let h = colMaxY[i] - colMinY[i] + 1
+        for i in 0..<colCount where coreColMinY[i] <= coreColMaxY[i] {
+            let h = coreColMaxY[i] - coreColMinY[i] + 1
             if h >= minColH {
-                bottoms.append(colMaxY[i])
-                tops.append(colMinY[i])
+                bottoms.append(coreColMaxY[i])
+                tops.append(coreColMinY[i])
+            }
+        }
+        if bottoms.count < 3 {
+            bottoms.removeAll()
+            tops.removeAll()
+            for i in 0..<colCount where colMinY[i] <= colMaxY[i] {
+                let h = colMaxY[i] - colMinY[i] + 1
+                if h >= minColH {
+                    bottoms.append(colMaxY[i])
+                    tops.append(colMinY[i])
+                }
             }
         }
 
@@ -1339,5 +1579,768 @@ private final class PDFPageBitmapAnalyzer {
             hasReliableCapHeight: hasCapsOrDigits && bottoms.count >= 4,
             appearsBold: appearsBold
         )
+    }
+}
+
+// MARK: - Embedded PDF Font Extractor, CMap Patcher & Open-Font Auto-Completer
+
+/// Extracts embedded font streams (`/FontFile`, `/FontFile2`, `/FontFile3`) and `/ToUnicode` maps directly from
+/// `CGPDFDocument`, upgrades subset open fonts (e.g. `Poppins`, `DM Serif Display`, `Montserrat`, `Roboto`, `Lato`, `Inter`)
+/// to complete `.ttf` fonts cached in `~/Library/Application Support/SimpleVector/Fonts/`, and strips `ABCDEF+` subset
+/// prefixes in-place so `PDFSelection`, `CanvasViewportView`, and `PDFCodec.exportPDF` render using the exact PDF font.
+public final class PDFEmbeddedFontRegistry: @unchecked Sendable {
+    public static let shared = PDFEmbeddedFontRegistry()
+
+    private let lock = NSLock()
+    private var cgFontsByKey: [String: CGFont] = [:]
+    private var completeFontsRegistered: Set<String> = []
+    private var attemptedRemoteFamilies: Set<String> = []
+    private var registeredFamilies: Set<String> = []
+
+    private let persistentCacheDir: URL
+    private let subsetTempDir: URL
+
+    private init() {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSTemporaryDirectory())
+        self.persistentCacheDir = appSupport
+            .appendingPathComponent("SimpleVector", isDirectory: true)
+            .appendingPathComponent("Fonts", isDirectory: true)
+        self.subsetTempDir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("SimpleVectorEmbeddedFonts", isDirectory: true)
+        try? FileManager.default.createDirectory(at: persistentCacheDir, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(at: subsetTempDir, withIntermediateDirectories: true)
+    }
+
+    public var registeredFamilyNames: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return Array(registeredFamilies).sorted()
+    }
+
+    public func hasRegisteredFont(postScriptName: String?, familyName: String?) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if let ps = postScriptName?.lowercased(), !ps.isEmpty, cgFontsByKey[ps] != nil {
+            return true
+        }
+        if let fam = familyName?.lowercased(), !fam.isEmpty, cgFontsByKey[fam] != nil {
+            return true
+        }
+        return false
+    }
+
+    public func makeCTFont(
+        postScriptName: String?,
+        familyName: String?,
+        size: CGFloat,
+        isBold: Bool,
+        isItalic: Bool
+    ) -> CTFont? {
+        lock.lock()
+        let cgFont: CGFont? = {
+            if let ps = postScriptName?.lowercased(), !ps.isEmpty, let f = cgFontsByKey[ps] {
+                return f
+            }
+            if let fam = familyName?.lowercased(), !fam.isEmpty, let f = cgFontsByKey[fam] {
+                return f
+            }
+            return nil
+        }()
+        lock.unlock()
+
+        if let cgFont {
+            let ct = CTFontCreateWithGraphicsFont(cgFont, size, nil, nil)
+            return Self.withMatchingCascadeFallback(ct, size: size, isBold: isBold, isItalic: isItalic)
+        }
+        return nil
+    }
+
+    /// Attaches a weight- and style-matched fallback cascade descriptor (`Avenir Next` for geometric sans, `Georgia` for serif)
+    /// so that if an offline commercial subset font is missing a newly typed base character, CoreText falls back to a
+    /// visually matching font instead of thin `Helvetica`.
+    public static func withMatchingCascadeFallback(
+        _ ctFont: CTFont,
+        size: CGFloat,
+        isBold: Bool,
+        isItalic: Bool
+    ) -> CTFont {
+        let psLower = (CTFontCopyPostScriptName(ctFont) as String).lowercased()
+        let isSerif = psLower.contains("serif") || psLower.contains("roman") || psLower.contains("garamond") || psLower.contains("baskerville")
+        let fallbackPS: String
+        if isSerif {
+            if isBold && isItalic { fallbackPS = "Georgia-BoldItalic" }
+            else if isBold { fallbackPS = "Georgia-Bold" }
+            else if isItalic { fallbackPS = "Georgia-Italic" }
+            else { fallbackPS = "Georgia" }
+        } else if psLower.contains("semibold") || psLower.contains("demi") {
+            fallbackPS = isItalic ? "AvenirNext-DemiBoldItalic" : "AvenirNext-DemiBold"
+        } else if psLower.contains("medium") {
+            fallbackPS = isItalic ? "AvenirNext-MediumItalic" : "AvenirNext-Medium"
+        } else if isBold {
+            fallbackPS = isItalic ? "AvenirNext-BoldItalic" : "AvenirNext-Bold"
+        } else {
+            fallbackPS = isItalic ? "AvenirNext-Italic" : "AvenirNext-Regular"
+        }
+        let fallbackDesc = CTFontDescriptorCreateWithNameAndSize(fallbackPS as CFString, size)
+        let attrs: [CFString: Any] = [
+            kCTFontCascadeListAttribute: [fallbackDesc] as CFArray
+        ]
+        let desc = CTFontDescriptorCreateWithAttributes(attrs as CFDictionary)
+        return CTFontCreateCopyWithAttributes(ctFont, size, nil, desc)
+    }
+
+    // MARK: - Scan & Register All Fonts from PDF Data
+
+    private struct ExtractedPDFFontEntry {
+        var cleanPSName: String
+        var subtype: String
+        var fontStreamData: Data?
+        var fontStreamExt: String
+        var toUnicodeStrings: [String]
+    }
+
+    public func registerFonts(fromPDFData data: Data) {
+        guard let provider = CGDataProvider(data: data as CFData),
+              let cgDoc = CGPDFDocument(provider),
+              cgDoc.numberOfPages > 0 else {
+            return
+        }
+
+        var entriesByPS: [String: ExtractedPDFFontEntry] = [:]
+        for pageIdx in 1...cgDoc.numberOfPages {
+            guard let page = cgDoc.page(at: pageIdx),
+                  let pageDict = page.dictionary else { continue }
+            var resDict: CGPDFDictionaryRef?
+            if CGPDFDictionaryGetDictionary(pageDict, "Resources", &resDict), let resDict {
+                collectFontsFromResources(resDict, into: &entriesByPS, depth: 0)
+            }
+        }
+
+        guard !entriesByPS.isEmpty else { return }
+
+        // Group font families that are not yet installed on macOS so we can resolve complete open fonts in a single batch
+        var familiesToFetch: Set<String> = []
+        for (cleanPS, _) in entriesByPS {
+            if isCompleteSystemOrRegisteredFont(postScriptName: cleanPS) {
+                continue
+            }
+            if loadFromLocalDiskCache(cleanPSName: cleanPS) {
+                continue
+            }
+            let parsed = Self.parsePostScriptFontName(cleanPS)
+            familiesToFetch.insert(parsed.family)
+        }
+
+        if !familiesToFetch.isEmpty {
+            fetchAndCacheGoogleFonts(families: Array(familiesToFetch))
+        }
+
+        // Finally, for any font still not registered as a complete font (e.g. LEMONMILK-Bold, Calibri, or when offline),
+        // patch and register its embedded PDF FontFile2 / FontFile3 / FontFile stream directly!
+        for (cleanPS, entry) in entriesByPS {
+            if isCompleteSystemOrRegisteredFont(postScriptName: cleanPS) {
+                continue
+            }
+            guard let rawFontData = entry.fontStreamData, rawFontData.count > 32 else { continue }
+            var patchedData = Self.stripSubsetPrefixFromTTF(rawFontData)
+            var mergedToUnicode: [UInt16: UInt16] = [:]
+            for s in entry.toUnicodeStrings {
+                let map = Self.parseToUnicode(s)
+                for (k, v) in map { mergedToUnicode[k] = v }
+            }
+            if !mergedToUnicode.isEmpty {
+                patchedData = Self.patchTrueTypeCmapIfNeeded(
+                    patchedData,
+                    toUnicodeMap: mergedToUnicode,
+                    isCIDFont: entry.subtype == "Type0"
+                )
+            }
+            registerFontBinary(patchedData, cleanPSName: cleanPS, ext: entry.fontStreamExt, isComplete: false)
+        }
+    }
+
+    private func collectFontsFromResources(
+        _ resDict: CGPDFDictionaryRef,
+        into entriesByPS: inout [String: ExtractedPDFFontEntry],
+        depth: Int
+    ) {
+        guard depth <= 4 else { return }
+        var fontDict: CGPDFDictionaryRef?
+        if CGPDFDictionaryGetDictionary(resDict, "Font", &fontDict), let fontDict {
+            withUnsafeMutablePointer(to: &entriesByPS) { ptr in
+                CGPDFDictionaryApplyBlock(fontDict, { _, obj, ctx in
+                    guard let entriesPtr = ctx?.assumingMemoryBound(to: [String: ExtractedPDFFontEntry].self) else {
+                        return true
+                    }
+                    var d: CGPDFDictionaryRef?
+                    guard CGPDFObjectGetValue(obj, .dictionary, &d), let d else { return true }
+                    PDFEmbeddedFontRegistry.extractFontEntry(from: d, into: &entriesPtr.pointee)
+                    return true
+                }, ptr)
+            }
+        }
+
+        // Also inspect Form XObjects that may carry their own /Resources -> /Font
+        var xobjDict: CGPDFDictionaryRef?
+        if CGPDFDictionaryGetDictionary(resDict, "XObject", &xobjDict), let xobjDict {
+            var nestedResources: [CGPDFDictionaryRef] = []
+            withUnsafeMutablePointer(to: &nestedResources) { ptr in
+                CGPDFDictionaryApplyBlock(xobjDict, { _, obj, ctx in
+                    guard let arrPtr = ctx?.assumingMemoryBound(to: [CGPDFDictionaryRef].self) else { return true }
+                    var streamRef: CGPDFStreamRef?
+                    guard CGPDFObjectGetValue(obj, .stream, &streamRef), let streamRef,
+                          let sDict = CGPDFStreamGetDictionary(streamRef) else { return true }
+                    var subPtr: UnsafePointer<CChar>?
+                    if CGPDFDictionaryGetName(sDict, "Subtype", &subPtr), let subPtr,
+                       String(cString: subPtr) == "Form" {
+                        var subRes: CGPDFDictionaryRef?
+                        if CGPDFDictionaryGetDictionary(sDict, "Resources", &subRes), let subRes {
+                            arrPtr.pointee.append(subRes)
+                        }
+                    }
+                    return true
+                }, ptr)
+            }
+            for subRes in nestedResources {
+                collectFontsFromResources(subRes, into: &entriesByPS, depth: depth + 1)
+            }
+        }
+    }
+
+    private static func extractFontEntry(
+        from d: CGPDFDictionaryRef,
+        into entriesByPS: inout [String: ExtractedPDFFontEntry]
+    ) {
+        var bfPtr: UnsafePointer<CChar>?
+        guard CGPDFDictionaryGetName(d, "BaseFont", &bfPtr), let bfPtr else { return }
+        let rawBaseFont = String(cString: bfPtr)
+        let cleanPS = stripSubsetPrefix(rawBaseFont)
+        guard !cleanPS.isEmpty else { return }
+
+        var subPtr: UnsafePointer<CChar>?
+        let subtype = (CGPDFDictionaryGetName(d, "Subtype", &subPtr) && subPtr != nil) ? String(cString: subPtr!) : ""
+
+        var fmt: CGPDFDataFormat = .raw
+        var toUniStr: String? = nil
+        var toUniStream: CGPDFStreamRef?
+        if CGPDFDictionaryGetStream(d, "ToUnicode", &toUniStream), let toUniStream,
+           let cfData = CGPDFStreamCopyData(toUniStream, &fmt) {
+            toUniStr = String(data: cfData as Data, encoding: .utf8) ?? String(data: cfData as Data, encoding: .isoLatin1)
+        }
+
+        var fd: CGPDFDictionaryRef?
+        if !CGPDFDictionaryGetDictionary(d, "FontDescriptor", &fd) {
+            var descArr: CGPDFArrayRef?
+            if CGPDFDictionaryGetArray(d, "DescendantFonts", &descArr), let descArr {
+                var cidDict: CGPDFDictionaryRef?
+                if CGPDFArrayGetDictionary(descArr, 0, &cidDict), let cidDict {
+                    CGPDFDictionaryGetDictionary(cidDict, "FontDescriptor", &fd)
+                }
+            }
+        }
+
+        var fontData: Data? = nil
+        var ext = "ttf"
+        if let fd {
+            var sRef: CGPDFStreamRef?
+            if CGPDFDictionaryGetStream(fd, "FontFile2", &sRef), let sRef,
+               let cfData = CGPDFStreamCopyData(sRef, &fmt) {
+                fontData = cfData as Data
+                ext = "ttf"
+            } else if CGPDFDictionaryGetStream(fd, "FontFile3", &sRef), let sRef,
+                      let cfData = CGPDFStreamCopyData(sRef, &fmt) {
+                fontData = cfData as Data
+                ext = "otf"
+            } else if CGPDFDictionaryGetStream(fd, "FontFile", &sRef), let sRef,
+                      let cfData = CGPDFStreamCopyData(sRef, &fmt) {
+                fontData = cfData as Data
+                ext = "pfb"
+            }
+        }
+
+        var entry = entriesByPS[cleanPS] ?? ExtractedPDFFontEntry(
+            cleanPSName: cleanPS,
+            subtype: subtype,
+            fontStreamData: nil,
+            fontStreamExt: ext,
+            toUnicodeStrings: []
+        )
+        if let fontData, fontData.count > (entry.fontStreamData?.count ?? 0) {
+            entry.fontStreamData = fontData
+            entry.fontStreamExt = ext
+        }
+        if let toUniStr, !toUniStr.isEmpty {
+            entry.toUnicodeStrings.append(toUniStr)
+        }
+        entriesByPS[cleanPS] = entry
+    }
+
+    private static func stripSubsetPrefix(_ name: String) -> String {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count > 7 else { return trimmed }
+        let plusIndex = trimmed.index(trimmed.startIndex, offsetBy: 6)
+        if trimmed[plusIndex] == "+" {
+            let prefix = trimmed[..<plusIndex]
+            if prefix.allSatisfy({ $0 >= "A" && $0 <= "Z" }) {
+                return String(trimmed[trimmed.index(after: plusIndex)...])
+            }
+        }
+        return trimmed
+    }
+
+    private func isCompleteSystemOrRegisteredFont(postScriptName: String) -> Bool {
+        let key = postScriptName.lowercased()
+        lock.lock()
+        let alreadyComplete = completeFontsRegistered.contains(key)
+        lock.unlock()
+        if alreadyComplete { return true }
+
+        let ct = CTFontCreateWithName(postScriptName as CFString, 12.0, nil)
+        let actualPS = (CTFontCopyPostScriptName(ct) as String).lowercased()
+        guard actualPS == key else { return false }
+
+        let probeChars: [UniChar] = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789éèêàùç".utf16)
+        var glyphs = [CGGlyph](repeating: 0, count: probeChars.count)
+        _ = CTFontGetGlyphsForCharacters(ct, probeChars, &glyphs, probeChars.count)
+        let nonZero = glyphs.filter { $0 != 0 }.count
+        if nonZero >= 60 {
+            let fam = CTFontCopyFamilyName(ct) as String
+            lock.lock()
+            completeFontsRegistered.insert(key)
+            if !fam.isEmpty { registeredFamilies.insert(fam) }
+            lock.unlock()
+            return true
+        }
+        return false
+    }
+
+    private func loadFromLocalDiskCache(cleanPSName: String) -> Bool {
+        let safe = cleanPSName.replacingOccurrences(of: "/", with: "_")
+        let cachedURL = persistentCacheDir.appendingPathComponent("\(safe).ttf")
+        if let data = try? Data(contentsOf: cachedURL), data.count > 64 {
+            return registerFontBinary(data, cleanPSName: cleanPSName, ext: "ttf", isComplete: true, existingURL: cachedURL)
+        }
+        // Also check Microsoft Office bundle fonts on macOS if present (e.g. Calibri, Cambria, Candara, Consolas)
+        let officeDirs = [
+            "/Applications/Microsoft Word.app/Contents/Resources/DFonts",
+            "/Library/Fonts/Microsoft"
+        ]
+        for dir in officeDirs {
+            let dirURL = URL(fileURLWithPath: dir)
+            guard let items = try? FileManager.default.contentsOfDirectory(at: dirURL, includingPropertiesForKeys: nil) else {
+                continue
+            }
+            for item in items where item.pathExtension.lowercased() == "ttf" || item.pathExtension.lowercased() == "ttc" {
+                let stem = item.deletingPathExtension().lastPathComponent.lowercased()
+                if stem == cleanPSName.lowercased().replacingOccurrences(of: "-", with: "") ||
+                   stem == cleanPSName.lowercased().split(separator: "-").first.map(String.init) {
+                    var err: Unmanaged<CFError>?
+                    CTFontManagerRegisterFontsForURL(item as CFURL, .process, &err)
+                    if isCompleteSystemOrRegisteredFont(postScriptName: cleanPSName) {
+                        return true
+                    }
+                }
+            }
+        }
+        return false
+    }
+
+    @discardableResult
+    private func registerFontBinary(
+        _ data: Data,
+        cleanPSName: String,
+        ext: String,
+        isComplete: Bool,
+        existingURL: URL? = nil
+    ) -> Bool {
+        guard let provider = CGDataProvider(data: data as CFData),
+              let cgFont = CGFont(provider) else {
+            return false
+        }
+
+        let targetURL: URL
+        if let existingURL {
+            targetURL = existingURL
+        } else {
+            let safe = cleanPSName.replacingOccurrences(of: "/", with: "_")
+            let dir = isComplete ? persistentCacheDir : subsetTempDir
+            targetURL = dir.appendingPathComponent("\(safe).\(ext)")
+            try? data.write(to: targetURL, options: .atomic)
+        }
+
+        var err: Unmanaged<CFError>?
+        let registeredViaURL = CTFontManagerRegisterFontsForURL(targetURL as CFURL, .process, &err)
+        if !registeredViaURL {
+            if let descArr = CTFontManagerCreateFontDescriptorsFromData(data as CFData) as? [CTFontDescriptor] {
+                CTFontManagerRegisterFontDescriptors(descArr as CFArray, .process, true, nil)
+            }
+        }
+
+        let ct = CTFontCreateWithGraphicsFont(cgFont, 12.0, nil, nil)
+        let ps = (CTFontCopyPostScriptName(ct) as String)
+        let fam = (CTFontCopyFamilyName(ct) as String)
+
+        lock.lock()
+        cgFontsByKey[cleanPSName.lowercased()] = cgFont
+        if !ps.isEmpty {
+            cgFontsByKey[ps.lowercased()] = cgFont
+        }
+        if !fam.isEmpty {
+            if cgFontsByKey[fam.lowercased()] == nil || isComplete {
+                cgFontsByKey[fam.lowercased()] = cgFont
+            }
+            registeredFamilies.insert(fam)
+        }
+        if isComplete {
+            completeFontsRegistered.insert(cleanPSName.lowercased())
+            if !ps.isEmpty { completeFontsRegistered.insert(ps.lowercased()) }
+        }
+        lock.unlock()
+        return true
+    }
+
+    // MARK: - Google Fonts Open-Font Auto-Completion
+
+    private static func parsePostScriptFontName(_ psName: String) -> (family: String, weight: Int, italic: Bool) {
+        let clean = stripSubsetPrefix(psName)
+        let parts = clean.split(separator: "-", maxSplits: 1).map(String.init)
+        let rawFam = parts[0]
+        let style = parts.count > 1 ? parts[1].lowercased() : "regular"
+
+        var spaced = ""
+        let chars = Array(rawFam)
+        for i in 0..<chars.count {
+            let c = chars[i]
+            if i > 0 && c.isUppercase {
+                let prev = chars[i - 1]
+                let nextIsLower = (i + 1 < chars.count) && chars[i + 1].isLowercase
+                if prev.isLowercase || (prev.isUppercase && nextIsLower) {
+                    spaced.append(" ")
+                }
+            }
+            spaced.append(c)
+        }
+
+        var weight = 400
+        if style.contains("thin") || style.contains("hairline") { weight = 100 }
+        else if style.contains("extralight") || style.contains("ultralight") { weight = 200 }
+        else if style.contains("light") { weight = 300 }
+        else if style.contains("medium") { weight = 500 }
+        else if style.contains("semibold") || style.contains("demibold") { weight = 600 }
+        else if style.contains("extrabold") || style.contains("ultrabold") { weight = 800 }
+        else if style.contains("black") || style.contains("heavy") { weight = 900 }
+        else if style.contains("bold") { weight = 700 }
+        let italic = style.contains("italic") || style.contains("oblique")
+        return (spaced, weight, italic)
+    }
+
+    private func fetchAndCacheGoogleFonts(families: [String]) {
+        var toQuery: [String] = []
+        lock.lock()
+        for fam in families {
+            let key = fam.lowercased()
+            if !attemptedRemoteFamilies.contains(key) {
+                attemptedRemoteFamilies.insert(key)
+                toQuery.append(fam)
+            }
+        }
+        lock.unlock()
+
+        guard !toQuery.isEmpty else { return }
+
+        let familySpecs = toQuery.map { fam -> String in
+            let plusFam = fam.replacingOccurrences(of: " ", with: "+")
+            return "\(plusFam):300,400,500,600,700,800,400i,700i"
+        }.joined(separator: "|")
+
+        guard let encoded = familySpecs.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+              let cssURL = URL(string: "https://fonts.googleapis.com/css?family=\(encoded)") else {
+            return
+        }
+
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 2.0
+        config.timeoutIntervalForResource = 3.5
+        let session = URLSession(configuration: config)
+
+        var req = URLRequest(url: cssURL)
+        req.setValue("Mozilla/5.0", forHTTPHeaderField: "User-Agent")
+
+        let sem = DispatchSemaphore(value: 0)
+        var cssData: Data? = nil
+        session.dataTask(with: req) { data, resp, _ in
+            if let http = resp as? HTTPURLResponse, http.statusCode == 200 {
+                cssData = data
+            }
+            sem.signal()
+        }.resume()
+        _ = sem.wait(timeout: .now() + 2.2)
+
+        guard let cssData, let css = String(data: cssData, encoding: .utf8), !css.isEmpty,
+              let urlRegex = try? NSRegularExpression(pattern: "url\\((https://[^)]+\\.ttf)\\)") else {
+            return
+        }
+
+        let matches = urlRegex.matches(in: css, range: NSRange(css.startIndex..., in: css))
+        let group = DispatchGroup()
+        var downloadedTTFs: [Data] = []
+        let dlLock = NSLock()
+
+        for m in matches {
+            guard let r = Range(m.range(at: 1), in: css),
+                  let ttfURL = URL(string: String(css[r])) else { continue }
+            group.enter()
+            session.dataTask(with: ttfURL) { data, resp, _ in
+                defer { group.leave() }
+                if let http = resp as? HTTPURLResponse, http.statusCode == 200,
+                   let data, data.count > 100 {
+                    dlLock.lock()
+                    downloadedTTFs.append(data)
+                    dlLock.unlock()
+                }
+            }.resume()
+        }
+        _ = group.wait(timeout: .now() + 3.0)
+
+        for ttfData in downloadedTTFs {
+            guard let provider = CGDataProvider(data: ttfData as CFData),
+                  let cgFont = CGFont(provider),
+                  let psName = cgFont.postScriptName as String?, !psName.isEmpty else {
+                continue
+            }
+            registerFontBinary(ttfData, cleanPSName: psName, ext: "ttf", isComplete: true)
+        }
+    }
+
+    // MARK: - In-Place TrueType `name` Subset Prefix Stripper & `/ToUnicode` `cmap` Patcher
+
+    /// Strips 6-letter `ABCDEF+` subset prefixes inside a TrueType `name` table in-place by advancing string offsets.
+    private static func stripSubsetPrefixFromTTF(_ data: Data) -> Data {
+        guard data.count > 12 else { return data }
+        let numTables = (Int(data[4]) << 8) | Int(data[5])
+        guard numTables > 0, numTables < 64, data.count >= 12 + numTables * 16 else { return data }
+        var out = data
+        for i in 0..<numTables {
+            let entryOffset = 12 + i * 16
+            let tag = String(bytes: data[entryOffset..<(entryOffset + 4)], encoding: .ascii) ?? ""
+            if tag == "name" {
+                let tableOffset = (Int(data[entryOffset + 8]) << 24)
+                    | (Int(data[entryOffset + 9]) << 16)
+                    | (Int(data[entryOffset + 10]) << 8)
+                    | Int(data[entryOffset + 11])
+                let tableLen = (Int(data[entryOffset + 12]) << 24)
+                    | (Int(data[entryOffset + 13]) << 16)
+                    | (Int(data[entryOffset + 14]) << 8)
+                    | Int(data[entryOffset + 15])
+                guard tableOffset > 0, tableLen >= 6, tableOffset + tableLen <= data.count else { break }
+                let count = (Int(data[tableOffset + 2]) << 8) | Int(data[tableOffset + 3])
+                let stringStorageOffset = tableOffset + ((Int(data[tableOffset + 4]) << 8) | Int(data[tableOffset + 5]))
+                for r in 0..<count {
+                    let recOffset = tableOffset + 6 + r * 12
+                    guard recOffset + 12 <= tableOffset + tableLen else { break }
+                    let platformID = (Int(data[recOffset]) << 8) | Int(data[recOffset + 1])
+                    let strLen = (Int(data[recOffset + 8]) << 8) | Int(data[recOffset + 9])
+                    let strOff = (Int(data[recOffset + 10]) << 8) | Int(data[recOffset + 11])
+                    let absStrOff = stringStorageOffset + strOff
+                    guard absStrOff >= 0, absStrOff + strLen <= tableOffset + tableLen else { continue }
+                    if platformID == 1 && strLen > 7 && out[absStrOff + 6] == 0x2B {
+                        let isUpper = (0..<6).allSatisfy { out[absStrOff + $0] >= 0x41 && out[absStrOff + $0] <= 0x5A }
+                        if isUpper {
+                            let newLen = strLen - 7
+                            out[recOffset + 8] = UInt8((newLen >> 8) & 0xFF)
+                            out[recOffset + 9] = UInt8(newLen & 0xFF)
+                            let newOff = strOff + 7
+                            out[recOffset + 10] = UInt8((newOff >> 8) & 0xFF)
+                            out[recOffset + 11] = UInt8(newOff & 0xFF)
+                        }
+                    } else if (platformID == 0 || platformID == 3) && strLen > 14 && out[absStrOff + 12] == 0x00 && out[absStrOff + 13] == 0x2B {
+                        let isUpper = (0..<6).allSatisfy {
+                            out[absStrOff + $0 * 2] == 0x00 && out[absStrOff + $0 * 2 + 1] >= 0x41 && out[absStrOff + $0 * 2 + 1] <= 0x5A
+                        }
+                        if isUpper {
+                            let newLen = strLen - 14
+                            out[recOffset + 8] = UInt8((newLen >> 8) & 0xFF)
+                            out[recOffset + 9] = UInt8(newLen & 0xFF)
+                            let newOff = strOff + 14
+                            out[recOffset + 10] = UInt8((newOff >> 8) & 0xFF)
+                            out[recOffset + 11] = UInt8(newOff & 0xFF)
+                        }
+                    }
+                }
+                break
+            }
+        }
+        return out
+    }
+
+    private static func parseToUnicode(_ text: String) -> [UInt16: UInt16] {
+        var map: [UInt16: UInt16] = [:]
+        guard let hexRegex = try? NSRegularExpression(pattern: "<([0-9A-Fa-f]+)>") else { return map }
+        let lines = text.components(separatedBy: .newlines)
+        var mode = 0 // 1 = bfchar, 2 = bfrange
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasSuffix("beginbfchar") { mode = 1; continue }
+            if trimmed.hasSuffix("beginbfrange") { mode = 2; continue }
+            if trimmed.hasPrefix("endbfchar") || trimmed.hasPrefix("endbfrange") { mode = 0; continue }
+            guard mode != 0 else { continue }
+            let matches = hexRegex.matches(in: trimmed, range: NSRange(trimmed.startIndex..., in: trimmed))
+            let hexes = matches.compactMap { m -> UInt16? in
+                guard let r = Range(m.range(at: 1), in: trimmed) else { return nil }
+                return UInt16(trimmed[r], radix: 16)
+            }
+            if mode == 1 && hexes.count >= 2 {
+                map[hexes[1]] = hexes[0]
+            } else if mode == 2 && hexes.count >= 3 {
+                let startCode = hexes[0]
+                let endCode = hexes[1]
+                let startUni = hexes[2]
+                if endCode >= startCode && (endCode - startCode) <= 512 {
+                    for delta in 0...(endCode - startCode) {
+                        map[startUni &+ delta] = startCode &+ delta
+                    }
+                }
+            }
+        }
+        return map
+    }
+
+    private static func patchTrueTypeCmapIfNeeded(
+        _ data: Data,
+        toUnicodeMap: [UInt16: UInt16],
+        isCIDFont: Bool
+    ) -> Data {
+        guard data.count > 12,
+              let provider = CGDataProvider(data: data as CFData),
+              let cgFont = CGFont(provider) else { return data }
+        let ctFont = CTFontCreateWithGraphicsFont(cgFont, 12.0, nil, nil)
+
+        var fullMap: [UInt16: UInt16] = [:]
+        var probeChars: [UniChar] = Array(0x0020...0x024F)
+        probeChars.append(contentsOf: [0x2013, 0x2014, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2026, 0x20AC])
+        var existingGlyphs = [CGGlyph](repeating: 0, count: probeChars.count)
+        _ = CTFontGetGlyphsForCharacters(ctFont, probeChars, &existingGlyphs, probeChars.count)
+        for (i, u) in probeChars.enumerated() where existingGlyphs[i] != 0 {
+            fullMap[u] = existingGlyphs[i]
+        }
+
+        var addedCount = 0
+        for (uni, code) in toUnicodeMap {
+            guard fullMap[uni] == nil || fullMap[uni] == 0 else { continue }
+            if isCIDFont {
+                if code != 0 && Int(code) < cgFont.numberOfGlyphs {
+                    fullMap[uni] = code
+                    addedCount += 1
+                }
+            } else if code < 256 {
+                var puaChar: [UniChar] = [0xF000 &+ code]
+                var puaGlyph: [CGGlyph] = [0]
+                _ = CTFontGetGlyphsForCharacters(ctFont, &puaChar, &puaGlyph, 1)
+                if puaGlyph[0] != 0 {
+                    fullMap[uni] = puaGlyph[0]
+                    addedCount += 1
+                }
+            }
+        }
+
+        guard addedCount > 0 else { return data }
+
+        let numTables = (Int(data[4]) << 8) | Int(data[5])
+        guard numTables > 0, numTables < 64, data.count >= 12 + numTables * 16 else { return data }
+        var cmapDirEntryOffset: Int? = nil
+        for i in 0..<numTables {
+            let entryOffset = 12 + i * 16
+            let tag = String(bytes: data[entryOffset..<(entryOffset + 4)], encoding: .ascii) ?? ""
+            if tag == "cmap" {
+                cmapDirEntryOffset = entryOffset
+                break
+            }
+        }
+        guard let entryOffset = cmapDirEntryOffset else { return data }
+
+        let newCmap = buildFormat4CmapTable(mapping: fullMap)
+        var out = data
+        while (out.count % 4) != 0 {
+            out.append(0)
+        }
+        let newOffset = UInt32(out.count)
+        let newLen = UInt32(newCmap.count)
+        out.append(newCmap)
+
+        out[entryOffset + 8] = UInt8((newOffset >> 24) & 0xFF)
+        out[entryOffset + 9] = UInt8((newOffset >> 16) & 0xFF)
+        out[entryOffset + 10] = UInt8((newOffset >> 8) & 0xFF)
+        out[entryOffset + 11] = UInt8(newOffset & 0xFF)
+        out[entryOffset + 12] = UInt8((newLen >> 24) & 0xFF)
+        out[entryOffset + 13] = UInt8((newLen >> 16) & 0xFF)
+        out[entryOffset + 14] = UInt8((newLen >> 8) & 0xFF)
+        out[entryOffset + 15] = UInt8(newLen & 0xFF)
+        return out
+    }
+
+    private static func buildFormat4CmapTable(mapping: [UInt16: UInt16]) -> Data {
+        let sorted = mapping.keys.sorted()
+        var startCodes: [UInt16] = []
+        var endCodes: [UInt16] = []
+        var idDeltas: [UInt16] = []
+        for uni in sorted {
+            guard let gid = mapping[uni], gid != 0, uni < 0xFFFF else { continue }
+            let delta = UInt16(bitPattern: Int16(truncatingIfNeeded: Int(gid) - Int(uni)))
+            if let lastEnd = endCodes.last, let lastDelta = idDeltas.last, uni == lastEnd + 1 && delta == lastDelta {
+                endCodes[endCodes.count - 1] = uni
+            } else {
+                startCodes.append(uni)
+                endCodes.append(uni)
+                idDeltas.append(delta)
+            }
+        }
+        startCodes.append(0xFFFF)
+        endCodes.append(0xFFFF)
+        idDeltas.append(1)
+
+        let segCount = UInt16(startCodes.count)
+        let segCountX2 = segCount * 2
+        var searchRange: UInt16 = 2
+        var entrySelector: UInt16 = 0
+        while searchRange * 2 <= segCountX2 {
+            searchRange *= 2
+            entrySelector += 1
+        }
+        let rangeShift = segCountX2 - searchRange
+        let subtableLength = UInt16(16 + Int(segCount) * 8)
+
+        var sub = Data()
+        func appendU16(_ v: UInt16) {
+            sub.append(UInt8((v >> 8) & 0xFF))
+            sub.append(UInt8(v & 0xFF))
+        }
+        appendU16(4)
+        appendU16(subtableLength)
+        appendU16(0)
+        appendU16(segCountX2)
+        appendU16(searchRange)
+        appendU16(entrySelector)
+        appendU16(rangeShift)
+        for c in endCodes { appendU16(c) }
+        appendU16(0)
+        for c in startCodes { appendU16(c) }
+        for d in idDeltas { appendU16(d) }
+        for _ in 0..<segCount { appendU16(0) }
+
+        var cmap = Data()
+        func cmapU16(_ v: UInt16) { cmap.append(UInt8((v >> 8) & 0xFF)); cmap.append(UInt8(v & 0xFF)) }
+        func cmapU32(_ v: UInt32) {
+            cmap.append(UInt8((v >> 24) & 0xFF))
+            cmap.append(UInt8((v >> 16) & 0xFF))
+            cmap.append(UInt8((v >> 8) & 0xFF))
+            cmap.append(UInt8(v & 0xFF))
+        }
+        cmapU16(0)
+        cmapU16(2)
+        cmapU16(0); cmapU16(3); cmapU32(20)
+        cmapU16(3); cmapU16(1); cmapU32(20)
+        cmap.append(sub)
+        return cmap
     }
 }

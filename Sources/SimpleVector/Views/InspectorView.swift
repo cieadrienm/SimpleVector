@@ -222,7 +222,8 @@ struct InspectorView: View {
                         }
                     )
                 ) {
-                    let choices = Array(Set(["Helvetica Neue", "Arial", "Verdana", "Trebuchet MS", "Avenir Next", "Gill Sans", "Times New Roman", "Georgia", "Courier New", payload.fontFamily])).sorted()
+                    let baseChoices = ["Helvetica Neue", "Arial", "Verdana", "Trebuchet MS", "Avenir Next", "Gill Sans", "Times New Roman", "Georgia", "Courier New", payload.fontFamily] + PDFEmbeddedFontRegistry.shared.registeredFamilyNames
+                    let choices = Array(Set(baseChoices.filter { !$0.isEmpty })).sorted()
                     ForEach(choices, id: \.self) { fam in
                         Text(fam).tag(fam)
                     }
