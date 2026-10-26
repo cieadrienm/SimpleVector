@@ -227,19 +227,21 @@ public enum VectorOperations {
 
     public static func makeFreehandSignatureElement(
         pageStrokes: [[VectorPoint]],
-        signerName: String = "Adrien Mondot",
+        signerName: String = "",
         colorHex: String = "#1E3A8A"
     ) -> VectorElement {
         let smoothed = pageStrokes.map { StrokeSmoother.smooth($0, iterations: 2) }
         let (bounds, norm) = StrokeSmoother.normalizeStrokes(smoothed)
         let df = DateFormatter()
         df.dateFormat = "dd/MM/yyyy"
+        let trimmedSigner = signerName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let elemName = trimmedSigner.isEmpty ? L("Signature", "Signature") : "\(L("Signature", "Signature")) \(trimmedSigner)"
         return VectorElement(
-            name: "\(L("Signature", "Signature")) \(signerName)",
+            name: elemName,
             kind: .signature(SignaturePayload(
-                signerName: signerName,
+                signerName: trimmedSigner,
                 dateLabel: df.string(from: Date()),
-                caption: "cie Adrien M",
+                caption: nil,
                 strokes: norm
             )),
             frame: VectorRect(

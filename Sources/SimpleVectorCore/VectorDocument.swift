@@ -448,7 +448,7 @@ public struct StampPayload: Equatable, Hashable, Codable, Sendable {
         } else {
             let df = DateFormatter()
             df.dateFormat = "dd/MM/yyyy"
-            self.subtitle = "cie Adrien M · \(df.string(from: Date()))"
+            self.subtitle = df.string(from: Date())
         }
         self.assetData = assetData
         self.assetExtension = assetExtension
@@ -810,29 +810,7 @@ public struct SignaturePreset: Identifiable, Equatable, Codable, Sendable {
         self.fileURL = fileURL
     }
 
-    public static let defaults: [SignaturePreset] = [
-        SignaturePreset(
-            title: "Adrien Mondot",
-            signerName: "Adrien Mondot",
-            caption: "cie Adrien M",
-            colorHex: "#1E3A8A",
-            strokes: calligraphicStrokes(seed: 1)
-        ),
-        SignaturePreset(
-            title: L("Paraphe AM", "Initials AM"),
-            signerName: "A. M.",
-            caption: "Compagnie Adrien M",
-            colorHex: "#111317",
-            strokes: paraphStrokes()
-        ),
-        SignaturePreset(
-            title: L("Visa Régie Générale", "Stage Manager Visa"),
-            signerName: "Régie cie Adrien M",
-            caption: L("Bon pour exécution", "Approved for stage"),
-            colorHex: "#0F766E",
-            strokes: calligraphicStrokes(seed: 2)
-        ),
-    ]
+    public static let defaults: [SignaturePreset] = []
 
     /// Generates an expressive, calligraphic normalized vector signature (`0...1` coordinates).
     public static func calligraphicStrokes(seed: Int = 1) -> [[VectorPoint]] {
@@ -861,33 +839,6 @@ public struct SignaturePreset: Identifiable, Equatable, Codable, Sendable {
         }
 
         return [mainStroke, underline]
-    }
-
-    public static func paraphStrokes() -> [[VectorPoint]] {
-        let aStroke: [VectorPoint] = [
-            VectorPoint(x: 0.08, y: 0.85),
-            VectorPoint(x: 0.24, y: 0.12),
-            VectorPoint(x: 0.38, y: 0.82),
-            VectorPoint(x: 0.14, y: 0.52),
-            VectorPoint(x: 0.44, y: 0.48),
-        ]
-        let mStroke: [VectorPoint] = [
-            VectorPoint(x: 0.46, y: 0.80),
-            VectorPoint(x: 0.54, y: 0.18),
-            VectorPoint(x: 0.66, y: 0.66),
-            VectorPoint(x: 0.78, y: 0.16),
-            VectorPoint(x: 0.92, y: 0.78),
-        ]
-        let flourish: [VectorPoint] = [
-            VectorPoint(x: 0.12, y: 0.90),
-            VectorPoint(x: 0.52, y: 0.83),
-            VectorPoint(x: 0.94, y: 0.72),
-        ]
-        return [
-            StrokeSmoother.smooth(aStroke, iterations: 2),
-            StrokeSmoother.smooth(mStroke, iterations: 2),
-            StrokeSmoother.smooth(flourish, iterations: 2),
-        ]
     }
 }
 

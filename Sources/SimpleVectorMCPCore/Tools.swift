@@ -50,7 +50,7 @@ public let simpleVectorToolDefinitions: [[String: Any]] = [
             "type": "object",
             "properties": [
                 "page": ["type": "integer", "description": "1-based page number (defaults to current page)"],
-                "signer": ["type": "string", "description": "Signer name (e.g. 'Adrien Mondot')"],
+                "signer": ["type": "string", "description": "Signer name"],
                 "x": ["type": "number", "description": "Center X coordinate in page points"],
                 "y": ["type": "number", "description": "Center Y coordinate in page points"],
                 "stamp": ["type": "string", "enum": ["approved", "signed", "stagePlot", "confidential", "draft"], "description": "Optional stamp to add"],

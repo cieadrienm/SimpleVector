@@ -28,7 +28,13 @@ public enum SyntheticDocument {
                     }
                 }
 
-                let sigPreset = SignaturePreset.defaults[0]
+                let sigPreset = SignaturePreset(
+                    title: "Direction Technique",
+                    signerName: "Direction Technique",
+                    caption: "",
+                    colorHex: "#1E3A8A",
+                    strokes: SignaturePreset.calligraphicStrokes(seed: 1)
+                )
                 let sigEl = VectorOperations.makeSignatureElement(
                     preset: sigPreset,
                     at: VectorPoint(x: 420, y: 695),
@@ -45,7 +51,13 @@ public enum SyntheticDocument {
 
             if doc.pages.count > 1 {
                 doc.pages[1].title = L("2 · Patch & Conduite Régie (PDF)", "2 · Patch & Stage Cue Sheet (PDF)")
-                let paraphPreset = SignaturePreset.defaults[1]
+                let paraphPreset = SignaturePreset(
+                    title: "Paraphe",
+                    signerName: "R. G.",
+                    caption: "",
+                    colorHex: "#111317",
+                    strokes: SignaturePreset.calligraphicStrokes(seed: 2)
+                )
                 let paraphEl = VectorOperations.makeSignatureElement(
                     preset: paraphPreset,
                     at: VectorPoint(x: 465, y: 720),
@@ -149,7 +161,7 @@ public enum SyntheticDocument {
             style: VectorStyle(strokeColorHex: "#D1D5DB", fillColorHex: "#FFFFFF", strokeWidth: 1.2, dashed: true)
         ))
         page1.elements.append(VectorOperations.makeTextElement(
-            text: L("VISA & SIGNATURE DIRECTION TECHNIQUE (cie Adrien M) :", "TECHNICAL DIRECTOR VISA & SIGNATURE (cie Adrien M):"),
+            text: L("VISA & SIGNATURE DIRECTION TECHNIQUE :", "TECHNICAL DIRECTOR VISA & SIGNATURE:"),
             at: VectorPoint(x: 62, y: 654),
             fontSize: 10.0,
             colorHex: "#4B5563",
@@ -169,7 +181,7 @@ public enum SyntheticDocument {
             (L("Ligne 2 : Pont Contre — 1 × Vidéoprojecteur Cyclo + 2 × Caméras IR", "Line 2: Upstage Truss — 1 × Cyclo Projector + 2 × IR Cameras"), 120, false),
             (L("Ligne 3 : Régie Salle — Switch Gigabit VLAN 10 (Art-Net / PJLink / OSC)", "Line 3: FOH Control — Gigabit Switch VLAN 10 (Art-Net / PJLink / OSC)"), 144, false),
             (L("Horaire montage : 09h00 Accrochage · 14h00 Focus & Calibrage · 18h00 Filage", "Schedule: 09:00 Rigging · 14:00 Focus & Calibration · 18:00 Run-through"), 184, false),
-            (L("Responsable régie : Adrien Mondot · cie Adrien M", "Stage lead: Adrien Mondot · cie Adrien M"), 220, true),
+            (L("Responsable régie : Direction Technique", "Stage lead: Technical Direction"), 220, true),
         ]
         for (txt, y, bold) in linesPage2 {
             page2.elements.append(VectorOperations.makeTextElement(

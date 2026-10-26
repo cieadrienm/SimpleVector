@@ -398,7 +398,7 @@ struct InspectorView: View {
                 .foregroundStyle(Theme.text.swiftUI)
             } else {
                 FieldRow(L("Signataire", "Signer"), width: 78) {
-                    CommitField(value: payload.signerName, placeholder: "Adrien Mondot") { newSigner in
+                    CommitField(value: payload.signerName, placeholder: L("Nom du signataire", "Signer name")) { newSigner in
                         ctrl.perform { doc in
                             VectorOperations.updateElement(id: el.id, onPage: ctrl.currentPageIndex, in: &doc) { item in
                                 if case .signature(var s) = item.kind {
@@ -410,7 +410,7 @@ struct InspectorView: View {
                     }
                 }
                 FieldRow(L("Mention", "Caption"), width: 78) {
-                    CommitField(value: payload.caption ?? "", placeholder: "cie Adrien M") { newCaption in
+                    CommitField(value: payload.caption ?? "", placeholder: L("Mention (optionnel)", "Caption (optional)")) { newCaption in
                         ctrl.perform { doc in
                             VectorOperations.updateElement(id: el.id, onPage: ctrl.currentPageIndex, in: &doc) { item in
                                 if case .signature(var s) = item.kind {
@@ -512,7 +512,7 @@ struct InspectorView: View {
                     }
                 }
                 FieldRow(L("Sous-titre", "Subtitle"), width: 78) {
-                    CommitField(value: payload.subtitle, placeholder: "cie Adrien M") { newSub in
+                    CommitField(value: payload.subtitle, placeholder: L("Date ou mention", "Date or caption")) { newSub in
                         ctrl.perform { doc in
                             VectorOperations.updateElement(id: el.id, onPage: ctrl.currentPageIndex, in: &doc) { item in
                                 if case .stamp(var st) = item.kind {
@@ -569,6 +569,15 @@ struct InspectorView: View {
                 .foregroundStyle(Theme.textFaint.swiftUI)
                 .lineLimit(1)
                 .truncationMode(.middle)
+
+            if ctrl.signatures.isEmpty {
+                Text(L("Aucune signature enregistrée. Cliquer sur « + Fichier… » pour importer un PDF/PNG/JPG dans le dossier Signatures, ou tracer une signature à la main avec l'outil Signature (S).", "No saved signatures. Click \"+ File…\" to import a PDF/PNG/JPG into the Signatures folder, or draw a freehand signature with the Signature tool (S)."))
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(Theme.textDim.swiftUI)
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Theme.lane.swiftUI))
+            }
 
             ForEach(ctrl.signatures) { preset in
                 let isSelected = preset.id == ctrl.activeSignaturePresetID

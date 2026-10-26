@@ -558,7 +558,7 @@ private final class SVGXMLParserDelegate: NSObject, XMLParserDelegate {
                 currentPage = VectorPage(title: pageTitle, width: pw, height: ph)
             } else if attrs["data-role"] == "signature" {
                 ctx.isSignatureGroup = true
-                ctx.signerName = attrs["data-signer"] ?? "Adrien Mondot"
+                ctx.signerName = attrs["data-signer"] ?? ""
                 signatureStrokesAccumulator.removeAll()
             } else if attrs["data-role"] == "stamp" {
                 ctx.isStampGroup = true
@@ -769,7 +769,7 @@ private final class SVGXMLParserDelegate: NSObject, XMLParserDelegate {
             if popped.isPageGroup {
                 pages.append(currentPage)
             } else if popped.isSignatureGroup, !signatureStrokesAccumulator.isEmpty {
-                let signer = popped.signerName ?? "Adrien Mondot"
+                let signer = popped.signerName ?? ""
                 let sigEl = VectorOperations.makeFreehandSignatureElement(
                     pageStrokes: signatureStrokesAccumulator,
                     signerName: signer,

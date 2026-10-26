@@ -86,7 +86,7 @@ struct OSCGuideSheet: View {
             ("/simplevector/page", "1..N", L("Aller à la page n°1..N du document multipage", "Jump to page #1..N of the multi-page document")),
             ("/simplevector/page/next", L("(aucun)", "(none)"), L("Passer à la page suivante", "Go to next page")),
             ("/simplevector/page/prev", L("(aucun)", "(none)"), L("Revenir à la page précédente", "Go to previous page")),
-            ("/simplevector/sign", "\"Adrien Mondot\"", L("Apposer une signature calligraphique sur la page active", "Place a calligraphic signature on the active page")),
+            ("/simplevector/sign", "\"Direction Technique\"", L("Apposer une signature calligraphique sur la page active", "Place a calligraphic signature on the active page")),
             ("/simplevector/stamp", "\"approved\"", L("Apposer un tampon (« approved », « signed », « stagePlot »)", "Place an approval or stage stamp")),
             ("/simplevector/open", "\"/chemin/plan.pdf\"", L("Ouvrir un document SVG ou PDF", "Open an SVG or PDF document")),
             ("/simplevector/export", "\"/tmp/sortie.pdf\"", L("Enregistrer en PDF vectoriel multipage, SVG ou PNG", "Export to multi-page vector PDF, SVG, or PNG")),
@@ -610,9 +610,9 @@ struct HelpManualSheet: View {
                 subtitle: L("Signer des contrats, fiches de validation et plans de régie en un clic.", "Sign contracts, approval sheets, and stage plots in one click.")
             )
             bulletList([
-                (L("Bibliothèque de signatures enregistrées", "Saved signature library"), L("Choisir une signature dans l'inspecteur droit (« Adrien Mondot », « Paraphe AM », « Visa Régie ») et cliquer sur « Signer » dans la barre haute.", "Choose a signature in the right inspector and click \"Sign\" in the top bar.")),
+                (L("Dossier Signatures & Tampons (PDF, PNG, JPG, SVG)", "Signatures & Stamps Folders (PDF, PNG, JPG, SVG)"), L("Importer des fichiers avec « + Fichier… » ou déposer les fichiers dans ~/Library/Application Support/SimpleVector/Signatures et Stamps. Le fond papier blanc d'un scan est détouré automatiquement.", "Import files with \"+ File…\" or drop them into ~/Library/Application Support/SimpleVector/Signatures and Stamps. Scanned white paper backgrounds are removed automatically.")),
                 (L("Tracé manuscrit lissé au trackpad ou à la souris (S)", "Smooth freehand signing with trackpad or mouse (S)"), L("Sélectionner l'outil Signature (S) et signer directement sur la feuille : le tracé est lissé en courbes souples et peut être enregistré dans la bibliothèque.", "Select the Signature tool (S) and sign directly on the sheet: the stroke is smoothed and can be saved to the library.")),
-                (L("Tampons vectoriels prêts à l'emploi (K)", "Ready-to-use vector stamps (K)"), L("Apposer les cartouches « BON POUR ACCORD », « SIGNÉ & VALIDÉ », « RÉGIE PLATEAU » ou « CONFIDENTIEL » avec date automatique.", "Stamp \"APPROVED\", \"SIGNED & VERIFIED\", \"STAGE CONTROL\", or \"CONFIDENTIAL\" badges with automatic date.")),
+                (L("Tampons vectoriels et rotation libre (-180° … +180°)", "Vector stamps and free rotation (-180° … +180°)"), L("Apposer un tampon personnalisé ou l'un des cartouches (« BON POUR ACCORD », « SIGNÉ & VALIDÉ », etc.) et l'orienter librement via la poignée de rotation sur le canevas ou le curseur de l'inspecteur.", "Place a custom stamp or built-in badge (\"APPROVED\", \"SIGNED & VERIFIED\", etc.) and rotate it freely via the canvas rotation handle or inspector slider.")),
             ])
 
         case .multipageAndSVG:

@@ -141,7 +141,7 @@ enum HeadlessCLI {
                 let preset = SignaturePreset(
                     title: signer,
                     signerName: signer,
-                    caption: "cie Adrien M",
+                    caption: "",
                     colorHex: "#1E3A8A",
                     strokes: SignaturePreset.calligraphicStrokes(seed: signer.count)
                 )

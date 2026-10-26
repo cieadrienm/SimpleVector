@@ -75,7 +75,7 @@ enum SelfTest {
         }
 
         // 6. OSC Codec round-trip
-        let oscMsg = OSCCodec.Message(address: "/simplevector/sign", arguments: [.string("Adrien Mondot")])
+        let oscMsg = OSCCodec.Message(address: "/simplevector/sign", arguments: [.string("Direction Technique")])
         let decoded = OSCCodec.decode(OSCCodec.encode(oscMsg))
         check("OSC 1.0 encode/decode round-trip", decoded.first == oscMsg)
 

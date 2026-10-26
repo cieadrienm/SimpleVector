@@ -3,6 +3,12 @@
 La version de SimpleVector vit à un seul endroit : `VERSION` dans `Scripts/bundle.sh` (G110).
 Correctif : `x.y.Z` ; fonction : `x.Y.0` ; rupture : `X.0.0`.
 
+## 0.2.1 — 2026-10-27
+
+- **Retrait total de toute signature ou mention pré-embarquée au nom d'Adrien Mondot / cie Adrien M** (`VectorDocument`, `VectorOperations`, `VectorController`, `InspectorView`, `SVGCodec`, `HeadlessCLI`) :
+  - `SignaturePreset.defaults` est désormais vide (`[]`) et l'ancien cache `UserDefaults` (`net.cieadrienm.simplevector.signatures`) est purgé au démarrage : aucune fausse signature (« Adrien Mondot », « Paraphe AM ») n'est présente dans le binaire distribué. Les signatures proviennent exclusivement du dossier `~/Library/Application Support/SimpleVector/Signatures/` ou des tracés créés par l'utilisateur.
+  - Les tampons génériques (`StampPayload`) affichent uniquement la date du jour (`dd/MM/yyyy`) en sous-titre par défaut, sans mention de compagnie pré-remplie.
+
 ## 0.2.0 — 2026-10-26
 
 - **Dossiers dédiés `Signatures` et `Tampons` (PDF, PNG, JPG, TIFF, HEIC, WebP, SVG), détourage automatique du fond papier blanc et rotation libre (`-180° … +180°`)** (`VectorDocument`, `AssetImageCodec`, `VectorController`, `CanvasViewportView`, `InspectorView`, `PDFCodec`, `SVGCodec`) :

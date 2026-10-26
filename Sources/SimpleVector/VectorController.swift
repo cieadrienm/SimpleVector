@@ -58,7 +58,8 @@ final class VectorController {
     var searchQuery: String = ""
 
     private let persistEnabled: Bool
-    private static let signaturesDefaultsKey = "net.cieadrienm.simplevector.signatures"
+    private static let signaturesDefaultsKey = "net.cieadrienm.simplevector.customSignatures"
+    private static let legacySignaturesDefaultsKey = "net.cieadrienm.simplevector.signatures"
 
     static var signaturesDirectoryURL: URL {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
@@ -87,14 +88,16 @@ final class VectorController {
             pages: [initialPage]
         )
         self.document = initialDoc
+        if persistEnabled {
+            UserDefaults.standard.removeObject(forKey: Self.legacySignaturesDefaultsKey)
+        }
         let loadedSignatures: [SignaturePreset]
         if persistEnabled,
            let data = UserDefaults.standard.data(forKey: Self.signaturesDefaultsKey),
-           let decoded = try? JSONDecoder().decode([SignaturePreset].self, from: data),
-           !decoded.isEmpty {
+           let decoded = try? JSONDecoder().decode([SignaturePreset].self, from: data) {
             loadedSignatures = decoded
         } else {
-            loadedSignatures = SignaturePreset.defaults
+            loadedSignatures = []
         }
         self.signatures = loadedSignatures
         self.activeSignaturePresetID = loadedSignatures.first?.id ?? UUID()
@@ -132,7 +135,15 @@ final class VectorController {
     }
 
     var activeSignaturePreset: SignaturePreset {
-        signatures.first { $0.id == activeSignaturePresetID } ?? SignaturePreset.defaults[0]
+        signatures.first { $0.id == activeSignaturePresetID }
+            ?? signatures.first
+            ?? SignaturePreset(
+                title: L("Signature", "Signature"),
+                signerName: "",
+                caption: "",
+                colorHex: "#1E3A8A",
+                strokes: SignaturePreset.calligraphicStrokes(seed: 1)
+            )
     }
 
     var filteredElementsOnCurrentPage: [VectorElement] {
@@ -526,10 +537,13 @@ final class VectorController {
 
     func saveCustomSignature(from element: VectorElement) {
         guard case .signature(let payload) = element.kind else { return }
+        let title = payload.signerName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? L("Signature manuscrite", "Handwritten Signature")
+            : payload.signerName
         let preset = SignaturePreset(
-            title: payload.signerName,
+            title: title,
             signerName: payload.signerName,
-            caption: payload.caption ?? "cie Adrien M",
+            caption: payload.caption ?? "",
             colorHex: element.style.strokeColorHex ?? "#1E3A8A",
             strokes: payload.strokes
         )
@@ -601,7 +615,7 @@ final class VectorController {
                 let preset = SignaturePreset(
                     title: signer,
                     signerName: signer,
-                    caption: "cie Adrien M",
+                    caption: "",
                     colorHex: "#1E3A8A",
                     strokes: SignaturePreset.calligraphicStrokes(seed: signer.count)
                 )
@@ -843,7 +857,7 @@ final class VectorController {
                     "GET /v1/snapshot.png?view=single|multipage|grid",
                     "POST /v1/open {\"path\":\"/path/to/file.pdf\"}",
                     "POST /v1/text {\"page\":1,\"match\":\"Statut\",\"text\":\"Statut : VALIDÉ\"}",
-                    "POST /v1/sign {\"page\":1,\"signer\":\"Adrien Mondot\",\"x\":420,\"y\":695,\"stamp\":\"approved\"}",
+                    "POST /v1/sign {\"page\":1,\"signer\":\"Direction Technique\",\"x\":420,\"y\":695,\"stamp\":\"approved\"}",
                     "POST /v1/page {\"format\":\"A4 Portrait\",\"duplicate\":false}",
                     "POST /v1/export {\"outputPath\":\"/tmp/out.pdf\",\"format\":\"pdf|svg|png\"}",
                 ],
@@ -952,11 +966,11 @@ final class VectorController {
             let x = (args["x"] as? Double) ?? (document.pages[pageIdx].width * 0.68)
             let y = (args["y"] as? Double) ?? (document.pages[pageIdx].height * 0.82)
             let preset = SignaturePreset(
-                title: signer,
+                title: signer.isEmpty ? L("Signature", "Signature") : signer,
                 signerName: signer,
-                caption: "cie Adrien M",
+                caption: "",
                 colorHex: "#1E3A8A",
-                strokes: SignaturePreset.calligraphicStrokes(seed: signer.count)
+                strokes: SignaturePreset.calligraphicStrokes(seed: max(1, signer.count))
             )
             let sigEl = VectorOperations.makeSignatureElement(preset: preset, at: VectorPoint(x: x, y: y), includeDate: true)
             perform("HTTP · Signature \(signer)") { doc in
