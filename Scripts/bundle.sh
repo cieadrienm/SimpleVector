@@ -5,7 +5,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 CONFIG="${1:-release}"
-VERSION="0.2.2"
+VERSION="0.2.3"
 BUILD="$(git rev-list --count HEAD 2>/dev/null || echo 1)"
 
 if [ ! -f Resources/AppIcon.icns ]; then
@@ -39,7 +39,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleVersion</key><string>@BUILD@</string>
     <key>CFBundleDevelopmentRegion</key><string>fr</string>
     <key>CFBundleLocalizations</key><array><string>fr</string><string>en</string></array>
-    <key>LSMinimumSystemVersion</key><string>15.0</string>
+    <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSPrincipalClass</key><string>NSApplication</string>
     <key>NSHumanReadableCopyright</key><string>cie Adrien M — Compagnie Adrien M</string>
@@ -68,20 +68,30 @@ sed -i '' -e "s/@VERSION@/$VERSION/" -e "s/@BUILD@/$BUILD/" "$APP/Contents/Info.
 
 if [ -z "${SIGN_IDENTITY:-}" ]; then
     IDENTITIES="$(security find-identity -v -p codesigning 2>/dev/null || true)"
-    SIGN_IDENTITY="$(echo "$IDENTITIES" | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -1)"
-    [ -n "$SIGN_IDENTITY" ] || SIGN_IDENTITY="$(echo "$IDENTITIES" | sed -n 's/.*"\(Apple Development: [^"]*\)".*/\1/p' | head -1)"
-    [ -n "$SIGN_IDENTITY" ] || SIGN_IDENTITY="-"
+    DEV_ID_LINE="$(echo "$IDENTITIES" | grep '"Developer ID Application: ' | tail -1 || true)"
+    if [ -n "$DEV_ID_LINE" ]; then
+        SIGN_HASH="$(echo "$DEV_ID_LINE" | awk '{print $2}')"
+        SIGN_IDENTITY="$(echo "$DEV_ID_LINE" | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p')"
+    else
+        APP_DEV_LINE="$(echo "$IDENTITIES" | grep '"Apple Development: ' | tail -1 || true)"
+        SIGN_HASH="$(echo "$APP_DEV_LINE" | awk '{print $2}')"
+        SIGN_IDENTITY="$(echo "$APP_DEV_LINE" | sed -n 's/.*"\(Apple Development: [^"]*\)".*/\1/p')"
+    fi
+    [ -n "${SIGN_IDENTITY:-}" ] || SIGN_IDENTITY="-"
+    [ -n "${SIGN_HASH:-}" ] || SIGN_HASH="$SIGN_IDENTITY"
+else
+    SIGN_HASH="$SIGN_IDENTITY"
 fi
 case "$SIGN_IDENTITY" in
     "Developer ID Application:"*) SIGN_FLAGS="--timestamp --options runtime" ;;
     *) SIGN_FLAGS="--timestamp=none" ;;
 esac
-if ! codesign --force $SIGN_FLAGS --sign "$SIGN_IDENTITY" "$APP/Contents/MacOS/simplevector-mcp" "$APP" 2>/tmp/simplevector-codesign.log; then
-    echo "warning: signing with '$SIGN_IDENTITY' failed; falling back to ad hoc" >&2
+if ! codesign --force $SIGN_FLAGS --sign "$SIGN_HASH" "$APP/Contents/MacOS/simplevector-mcp" "$APP" 2>/tmp/simplevector-codesign.log; then
+    echo "warning: signing with '$SIGN_IDENTITY' ($SIGN_HASH) failed; falling back to ad hoc" >&2
     SIGN_IDENTITY="-"
     codesign --force --sign - "$APP/Contents/MacOS/simplevector-mcp" "$APP"
 fi
-echo "signed: $SIGN_IDENTITY" >&2
+echo "signed: $SIGN_IDENTITY ($SIGN_HASH)" >&2
 
 if [ "${NOTARIZE:-0}" = "1" ]; then
     case "$SIGN_IDENTITY" in

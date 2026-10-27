@@ -3,6 +3,13 @@
 La version de SimpleVector vit à un seul endroit : `VERSION` dans `Scripts/bundle.sh` (G110).
 Correctif : `x.y.Z` ; fonction : `x.Y.0` ; rupture : `X.0.0`.
 
+## 0.2.3 — 2026-10-27
+
+- **Signature `Developer ID Application` en Hardened Runtime, notarisation Apple (`notarytool` + `stapler`) et compatibilité macOS 14 Sonoma → macOS 26 Tahoe** (`Scripts/bundle.sh`, `Package.swift`, `SimpleUpdater`) :
+  - **Résolution du rejet Gatekeeper sur les versions récentes de macOS** : `Scripts/bundle.sh` sélectionne désormais l'empreinte SHA-1 exacte du certificat `Developer ID Application: Adrien Mondot (KJ2CG4YTE4)` (évitant l'erreur `codesign: ambiguous` lorsqu'un certificat figure en double dans le trousseau et le repli sur `Apple Development` ou ad-hoc `-`), signe en Hardened Runtime (`--options runtime --timestamp`) et agrafe le ticket de notarisation Apple (`spctl -a` : `accepted, source=Notarized Developer ID`).
+  - **Cible de déploiement `macOS 14.0+` (`LSMinimumSystemVersion = 14.0`)** : compatibilité native de macOS 14 Sonoma à macOS 15 Sequoia et macOS 26 Tahoe.
+  - **Transition de Team ID dans `SimpleUpdater`** : autorise la mise à jour transparente des installations initiales (`A4Z547XTDF`) vers les versions signées et notarisées `Developer ID` (`KJ2CG4YTE4`).
+
 ## 0.2.2 — 2026-10-27
 
 - **Redimensionnement strictement proportionnel des signatures et des tampons** (`CanvasViewportView`, `InspectorView`) :

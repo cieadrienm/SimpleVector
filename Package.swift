@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "SimpleVector",
-    platforms: [.macOS(.v15)],
+    platforms: [.macOS(.v14)],
     products: [
         .library(name: "SimpleVectorCore", targets: ["SimpleVectorCore"]),
         .library(name: "SimpleVectorMCPCore", targets: ["SimpleVectorMCPCore"]),

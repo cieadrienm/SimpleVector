@@ -389,12 +389,15 @@ public final class SimpleUpdater {
         try runProcess("/usr/bin/codesign", arguments: ["--verify", "--deep", "--strict", appURL.path])
 
         let currentAppURL = Bundle.main.bundleURL
+        let trustedTeams: Set<String> = ["KJ2CG4YTE4", "A4Z547XTDF"]
         if currentAppURL.pathExtension == "app",
            let currentTeam = teamIdentifier(of: currentAppURL),
            !currentTeam.isEmpty,
            currentTeam != "not set" {
             let newTeam = teamIdentifier(of: appURL)
-            guard newTeam == currentTeam else {
+            let isSameOrTrustedTransition = (newTeam == currentTeam)
+                || (trustedTeams.contains(currentTeam) && newTeam != nil && trustedTeams.contains(newTeam!))
+            guard isSameOrTrustedTransition else {
                 throw NSError(domain: "SimpleUpdater", code: 12, userInfo: [
                     NSLocalizedDescriptionKey: L(
                         "Certificat développeur différent (\(newTeam ?? "inconnu") ≠ \(currentTeam)).",
