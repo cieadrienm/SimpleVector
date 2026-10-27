@@ -4,13 +4,13 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-APP_PATH="$(./Scripts/bundle.sh release | tail -1)"
+APP_PATH="$(NOTARIZE="${NOTARIZE:-1}" ./Scripts/bundle.sh release | tail -1)"
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_PATH/Contents/Info.plist")"
 BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP_PATH/Contents/Info.plist")"
 ZIP_PATH="build/SimpleVector-${VERSION}.zip"
 
 rm -f "$ZIP_PATH"
-/usr/bin/ditto -c -k --keepParent "$APP_PATH" "$ZIP_PATH"
+/usr/bin/ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "$ZIP_PATH"
 SHA256="$(shasum -a 256 "$ZIP_PATH" | awk '{print $1}')"
 
 cat <<EOF

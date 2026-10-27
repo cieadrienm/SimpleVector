@@ -93,16 +93,23 @@ if ! codesign --force $SIGN_FLAGS --sign "$SIGN_HASH" "$APP/Contents/MacOS/simpl
 fi
 echo "signed: $SIGN_IDENTITY ($SIGN_HASH)" >&2
 
-if [ "${NOTARIZE:-0}" = "1" ]; then
+# NOTARIZE defaults to 1 on release builds signed with Developer ID Application (pass NOTARIZE=0 to skip)
+if [ "${NOTARIZE:-$([ "$CONFIG" = release ] && echo 1 || echo 0)}" = "1" ]; then
     case "$SIGN_IDENTITY" in
-        "Developer ID Application:"*) ;;
-        *) echo "error: NOTARIZE=1 needs a Developer ID Application certificate" >&2; exit 1 ;;
+        "Developer ID Application:"*)
+            ditto -c -k --keepParent "$APP" "$APP.notarize.zip"
+            xcrun notarytool submit "$APP.notarize.zip" --keychain-profile "${NOTARY_PROFILE:-notary}" --wait
+            rm -f "$APP.notarize.zip"
+            xcrun stapler staple "$APP"
+            echo "notarized and stapled" >&2
+            ;;
+        *)
+            if [ "${NOTARIZE:-}" = "1" ]; then
+                echo "error: NOTARIZE=1 needs a Developer ID Application certificate" >&2
+                exit 1
+            fi
+            ;;
     esac
-    ditto -c -k --keepParent "$APP" "$APP.notarize.zip"
-    xcrun notarytool submit "$APP.notarize.zip" --keychain-profile "${NOTARY_PROFILE:-notary}" --wait
-    rm -f "$APP.notarize.zip"
-    xcrun stapler staple "$APP"
-    echo "notarized and stapled" >&2
 fi
 
 INSTALL_DIR="${INSTALL_DIR:-/Applications}"
