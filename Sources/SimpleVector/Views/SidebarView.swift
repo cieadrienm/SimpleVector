@@ -219,9 +219,11 @@ private struct MiniPagePreview: View {
 
     var body: some View {
         Canvas { ctx, size in
+            let pageBounds = CGRect(origin: .zero, size: size)
+            ctx.clip(to: Path(roundedRect: pageBounds, cornerRadius: 3))
             let bg = RGBAColor(hex: page.backgroundColorHex) ?? RGBAColor(r: 1, g: 1, b: 1)
             ctx.fill(
-                Path(roundedRect: CGRect(origin: .zero, size: size), cornerRadius: 3),
+                Path(roundedRect: pageBounds, cornerRadius: 3),
                 with: .color(Color(red: bg.r, green: bg.g, blue: bg.b))
             )
 
@@ -229,11 +231,18 @@ private struct MiniPagePreview: View {
             let sy = size.height / CGFloat(max(1, page.height))
 
             for el in page.elements.prefix(24) where el.visible {
+                let effectiveFrame: VectorRect
+                if let clip = el.clipRect {
+                    guard let clipped = el.frame.intersecting(clip) else { continue }
+                    effectiveFrame = clipped
+                } else {
+                    effectiveFrame = el.frame
+                }
                 let r = CGRect(
-                    x: CGFloat(el.frame.x) * sx,
-                    y: CGFloat(el.frame.y) * sy,
-                    width: max(2, CGFloat(el.frame.width) * sx),
-                    height: max(1.5, CGFloat(el.frame.height) * sy)
+                    x: CGFloat(effectiveFrame.x) * sx,
+                    y: CGFloat(effectiveFrame.y) * sy,
+                    width: max(2, CGFloat(effectiveFrame.width) * sx),
+                    height: max(1.5, CGFloat(effectiveFrame.height) * sy)
                 )
                 switch el.kind {
                 case .signature:

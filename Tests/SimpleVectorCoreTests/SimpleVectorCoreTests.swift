@@ -256,4 +256,70 @@ struct SimpleVectorCoreTests {
         #expect(exportedSVG.contains("data:image/png;base64,"))
         #expect(exportedSVG.contains("rotate(32.5"))
     }
+
+    @Test("Root viewBox scaling, nested SVG viewport clipping, and default circle/text coordinates")
+    func testNestedSVGViewBoxAndClipRect() throws {
+        let svg = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <svg xmlns="http://www.w3.org/2000/svg" width="210mm" height="297mm" viewBox="0 0 1050 1485">
+          <rect width="1050" height="1485" fill="#F2F0EB"/>
+          <svg x="40" y="95" width="970" height="1125" viewBox="-1180 -760 2360 1520">
+            <rect x="-2000" y="-2000" width="4000" height="4000" fill="#ECE8DF"/>
+            <path d="M-2585 -342L10475 3518" fill="none" stroke="#8CB4C9" stroke-width="18"/>
+            <g transform="translate(-397.4, 199.0)">
+              <circle r="19" fill="#F4D03F" stroke="#14110F" stroke-width="2.2"/>
+              <text y="5" text-anchor="middle" font-size="14" font-weight="800" fill="#14110F">1</text>
+            </g>
+          </svg>
+          <rect x="40" y="95" width="970" height="1125" fill="none" stroke="#14110F" stroke-width="2"/>
+          <text x="40" y="58" font-size="34" font-weight="800" fill="#14110F">SENTIERS #6 — CREST</text>
+        </svg>
+        """
+        let doc = try SVGCodec.importSVG(string: svg, title: "Sentiers")
+        let page = try #require(doc.pages.first)
+        // 210mm x 297mm in points (~595.28 x 841.89)
+        #expect(abs(page.width - 595.28) < 0.5)
+        #expect(abs(page.height - 841.89) < 0.5)
+        #expect(page.backgroundColorHex == "#F2F0EB")
+
+        let rootScale = page.width / 1050.0
+        let expectedViewport = VectorRect(
+            x: 40.0 * rootScale,
+            y: 95.0 * rootScale,
+            width: 970.0 * rootScale,
+            height: 1125.0 * rootScale
+        )
+
+        // The river path inside the nested <svg> must be clipped to the nested <svg> viewport
+        let riverPath = try #require(page.elements.first {
+            if case .path = $0.kind { return true }
+            return false
+        })
+        let clip = try #require(riverPath.clipRect)
+        #expect(abs(clip.x - expectedViewport.x) < 0.5)
+        #expect(abs(clip.y - expectedViewport.y) < 0.5)
+        #expect(abs(clip.width - expectedViewport.width) < 0.5)
+        #expect(abs(clip.height - expectedViewport.height) < 0.5)
+
+        // The pin circle (<circle r="19"/> with omitted cx/cy=0) and label (<text y="5">1</text> with omitted x=0)
+        // must share the same horizontal center inside the nested <svg> viewport
+        let pinCircle = try #require(page.elements.first {
+            if case .shape(let s) = $0.kind { return s.shapeType == .ellipse }
+            return false
+        })
+        let pinLabel = try #require(page.elements.first {
+            if case .text(let t) = $0.kind { return t.text == "1" }
+            return false
+        })
+        #expect(abs(pinCircle.frame.midX - pinLabel.frame.midX) < 0.5)
+        #expect(expectedViewport.contains(pinCircle.frame.center))
+
+        // Heading outside the nested <svg> must not have a clipRect and must be positioned near the top of the page
+        let heading = try #require(page.elements.first {
+            if case .text(let t) = $0.kind { return t.text.contains("SENTIERS") }
+            return false
+        })
+        #expect(heading.clipRect == nil)
+        #expect(heading.frame.minY < expectedViewport.minY)
+    }
 }

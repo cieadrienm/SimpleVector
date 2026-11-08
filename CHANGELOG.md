@@ -3,6 +3,14 @@
 La version de SimpleVector vit à un seul endroit : `VERSION` dans `Scripts/bundle.sh` (G110).
 Correctif : `x.y.Z` ; fonction : `x.Y.0` ; rupture : `X.0.0`.
 
+## 0.2.4 — 2026-11-08
+
+- **Cadrage fidèle des documents SVG complexes (`viewBox` racine, `<svg>` imbriqués, découpe de viewport et attributs CSS/typographiques)** (`SVGCodec`, `VectorDocument`, `PDFCodec`, `CanvasViewportView`, `SidebarView`) :
+  - **Mise à l'échelle `viewBox` et `preserveAspectRatio` sur le `<svg>` racine** : lorsqu'un SVG combine des dimensions physiques (`width="210mm" height="297mm"`) et un `viewBox` (`0 0 1050 1485`), SimpleVector applique désormais la transformation `viewBox` exacte (`xMin/xMid/xMax`, `yMin/yMid/yMax`, `meet`, `slice`, `none`) vers la feuille en points.
+  - **Support des `<svg>` imbriqués et découpe de leur viewport (`clipRect`)** : prise en charge des balises `<svg x="…" y="…" width="…" height="…" viewBox="…">` imbriquées (y compris avec origines `viewBox` négatives), avec découpe vectorielle au cadre du viewport sur le canevas interactif, dans les vignettes et lors de l'export PDF/PNG/SVG.
+  - **Conformité des coordonnées par défaut et des styles SVG** : correction des valeurs par défaut `cx="0"` / `cy="0"` sur `<circle>`/`<ellipse>` et `x="0"` / `y="0"` sur `<text>`, mise à l'échelle proportionnelle de `stroke-width`, prise en charge de `rotate(angle cx cy)`, `letter-spacing`, `text-transform: uppercase`, héritage de `opacity` et de `fill="none"` sur les groupes `<g>`, et rendu fidèle des petits corps de texte (`>= 1 pt`).
+- **Binaire universel (`Apple Silicon + Intel`)** (`Scripts/bundle.sh`) : compilation universelle `arm64 + x86_64` en mode release.
+
 ## 0.2.3 — 2026-10-27
 
 - **Signature `Developer ID Application` en Hardened Runtime, notarisation Apple (`notarytool` + `stapler`) et compatibilité macOS 14 Sonoma → macOS 26 Tahoe** (`Scripts/bundle.sh`, `Package.swift`, `SimpleUpdater`) :

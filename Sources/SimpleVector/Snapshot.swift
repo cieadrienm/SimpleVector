@@ -58,9 +58,13 @@ enum Snapshot {
         return rep.representation(using: .png, properties: [:])
     }
 
-    static func runCLISnapshot(outputPath: String, view: String = "single") -> Never {
+    static func runCLISnapshot(outputPath: String, view: String = "single", inputFile: String? = nil) -> Never {
         NSApp.appearance = NSAppearance(named: .darkAqua)
         let model = AppModel(startServices: false, persistEnabled: false)
+        if let inputFile {
+            let url = URL(fileURLWithPath: (inputFile as NSString).expandingTildeInPath)
+            try? model.controller.openFile(at: url)
+        }
         let png: Data?
 
         switch view {

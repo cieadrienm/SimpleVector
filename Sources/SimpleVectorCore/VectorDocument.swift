@@ -57,6 +57,15 @@ public struct VectorRect: Equatable, Hashable, Codable, Sendable {
         !(other.minX > maxX || other.maxX < minX || other.minY > maxY || other.maxY < minY)
     }
 
+    public func intersecting(_ other: VectorRect) -> VectorRect? {
+        let nx0 = max(minX, other.minX)
+        let ny0 = max(minY, other.minY)
+        let nx1 = min(maxX, other.maxX)
+        let ny1 = min(maxY, other.maxY)
+        guard nx1 > nx0, ny1 > ny0 else { return nil }
+        return VectorRect(x: nx0, y: ny0, width: nx1 - nx0, height: ny1 - ny0)
+    }
+
     public func insetBy(dx: Double, dy: Double) -> VectorRect {
         VectorRect(
             x: x + dx,
@@ -259,7 +268,7 @@ public struct TextPayload: Equatable, Hashable, Codable, Sendable {
         self.text = text
         self.fontFamily = fontFamily
         self.postScriptFontName = postScriptFontName
-        self.fontSize = max(5.0, fontSize)
+        self.fontSize = max(1.0, fontSize)
         self.isBold = isBold
         self.isItalic = isItalic
         self.alignment = alignment
@@ -471,6 +480,7 @@ public struct VectorElement: Identifiable, Equatable, Hashable, Codable, Sendabl
     public var name: String
     public var kind: VectorElementKind
     public var frame: VectorRect
+    public var clipRect: VectorRect?
     public var rotationDegrees: Double
     public var style: VectorStyle
     public var visible: Bool
@@ -481,6 +491,7 @@ public struct VectorElement: Identifiable, Equatable, Hashable, Codable, Sendabl
         name: String,
         kind: VectorElementKind,
         frame: VectorRect,
+        clipRect: VectorRect? = nil,
         rotationDegrees: Double = 0,
         style: VectorStyle = .defaultShape,
         visible: Bool = true,
@@ -490,6 +501,7 @@ public struct VectorElement: Identifiable, Equatable, Hashable, Codable, Sendabl
         self.name = name
         self.kind = kind
         self.frame = frame
+        self.clipRect = clipRect
         self.rotationDegrees = rotationDegrees
         self.style = style
         self.visible = visible

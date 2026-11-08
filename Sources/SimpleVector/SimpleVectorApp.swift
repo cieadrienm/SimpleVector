@@ -281,7 +281,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             headless = true
             let path = index + 1 < args.count && !args[index + 1].hasPrefix("-") ? args[index + 1] : "/tmp/simplevector.png"
             let view = args.firstIndex(of: "--view").flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil } ?? "single"
-            Snapshot.runCLISnapshot(outputPath: path, view: view)
+            var inputFile: String? = nil
+            var i = 0
+            while i < args.count {
+                if args[i] == "--snapshot" || args[i] == "--view" || args[i] == "--lang" {
+                    i += 2
+                    continue
+                }
+                if !args[i].hasPrefix("-") {
+                    inputFile = args[i]
+                    break
+                }
+                i += 1
+            }
+            Snapshot.runCLISnapshot(outputPath: path, view: view, inputFile: inputFile)
         }
     }
 

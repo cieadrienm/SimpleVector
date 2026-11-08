@@ -1,4 +1,5 @@
 import CoreGraphics
+import CoreText
 import Foundation
 import ImageIO
 import UniformTypeIdentifiers
@@ -54,12 +55,7 @@ public enum SVGCodec {
         lines.append("<svg xmlns=\"http://www.w3.org/2000/svg\" version=\"1.1\" width=\"\(w)\" height=\"\(h)\" viewBox=\"0 0 \(w) \(h)\">")
         lines.append("  <title>\(escapeXML(documentTitle)) — \(escapeXML(page.title))</title>")
         lines.append("  <rect width=\"\(w)\" height=\"\(h)\" fill=\"\(escapeXML(page.backgroundColorHex))\" data-role=\"page-background\"/>")
-        for element in page.elements where element.visible {
-            if case .text(let t) = element.kind, t.isPDFExtracted && !element.hasModifiedPDFText && page.pdfPageData != nil {
-                // Still export extracted PDF text into SVG so SVG output is complete and standalone
-            }
-            lines.append(contentsOf: serializeElement(element, indent: "  "))
-        }
+        lines.append(contentsOf: serializeElements(page.elements.filter(\.visible), indent: "  "))
         lines.append("</svg>")
         return lines.joined(separator: "\n") + "\n"
     }
@@ -83,14 +79,42 @@ public enum SVGCodec {
             let yOffStr = formatNum(yOffset)
             lines.append("  <g id=\"page-\(idx + 1)\" data-page-index=\"\(idx + 1)\" data-page-title=\"\(escapeXML(page.title))\" data-page-width=\"\(pw)\" data-page-height=\"\(ph)\" transform=\"translate(0, \(yOffStr))\">")
             lines.append("    <rect width=\"\(pw)\" height=\"\(ph)\" fill=\"\(escapeXML(page.backgroundColorHex))\" data-role=\"page-background\"/>")
-            for element in page.elements where element.visible {
-                lines.append(contentsOf: serializeElement(element, indent: "    "))
-            }
+            lines.append(contentsOf: serializeElements(page.elements.filter(\.visible), indent: "    "))
             lines.append("  </g>")
             yOffset += page.height + gap
         }
         lines.append("</svg>")
         return lines.joined(separator: "\n") + "\n"
+    }
+
+    private static func serializeElements(_ elements: [VectorElement], indent: String) -> [String] {
+        var lines: [String] = []
+        var activeClip: VectorRect? = nil
+
+        func closeActiveClipIfNeeded() {
+            if activeClip != nil {
+                lines.append("\(indent)</svg>")
+                activeClip = nil
+            }
+        }
+
+        for element in elements {
+            if element.clipRect != activeClip {
+                closeActiveClipIfNeeded()
+                if let clip = element.clipRect {
+                    let cx = formatNum(clip.x)
+                    let cy = formatNum(clip.y)
+                    let cw = formatNum(clip.width)
+                    let ch = formatNum(clip.height)
+                    lines.append("\(indent)<svg x=\"\(cx)\" y=\"\(cy)\" width=\"\(cw)\" height=\"\(ch)\" viewBox=\"\(cx) \(cy) \(cw) \(ch)\" overflow=\"hidden\">")
+                    activeClip = clip
+                }
+            }
+            let childIndent = activeClip != nil ? indent + "  " : indent
+            lines.append(contentsOf: serializeElement(element, indent: childIndent))
+        }
+        closeActiveClipIfNeeded()
+        return lines
     }
 
     private static func serializeElement(_ el: VectorElement, indent: String) -> [String] {
@@ -460,12 +484,15 @@ public enum SVGCodec {
 
 private final class SVGXMLParserDelegate: NSObject, XMLParserDelegate {
     struct GroupContext {
-        var translateX: Double = 0
-        var translateY: Double = 0
+        var offsetX: Double = 0
+        var offsetY: Double = 0
         var scaleX: Double = 1
         var scaleY: Double = 1
+        var rotationDegrees: Double = 0
+        var clipRect: VectorRect? = nil
         var strokeHex: String? = nil
         var fillHex: String? = nil
+        var hasExplicitFill: Bool = false
         var strokeWidth: Double? = nil
         var opacity: Double = 1.0
         var isPageGroup: Bool = false
@@ -481,6 +508,7 @@ private final class SVGXMLParserDelegate: NSObject, XMLParserDelegate {
     var pages: [VectorPage] = []
     var currentPage: VectorPage
     var groupStack: [GroupContext] = [GroupContext()]
+    var svgDepth: Int = 0
     var signatureStrokesAccumulator: [[VectorPoint]] = []
     var activeTextAttributes: [String: String]? = nil
     var activeTextAccumulator: String = ""
@@ -500,18 +528,85 @@ private final class SVGXMLParserDelegate: NSObject, XMLParserDelegate {
         return pages
     }
 
-    private var currentTransform: (offset: VectorPoint, scale: VectorPoint) {
-        var ox = 0.0
-        var oy = 0.0
-        var sx = 1.0
-        var sy = 1.0
-        for g in groupStack where !g.isPageGroup {
-            ox += g.translateX * sx
-            oy += g.translateY * sy
-            sx *= g.scaleX
-            sy *= g.scaleY
+    private func effectiveTransform(for attrs: [String: String]) -> (offset: VectorPoint, scale: VectorPoint, rotation: Double, clip: VectorRect?) {
+        let g = groupStack.last ?? GroupContext()
+        var ox = g.offsetX
+        var oy = g.offsetY
+        var sx = g.scaleX
+        var sy = g.scaleY
+        var rot = g.rotationDegrees
+        if let transform = attrs["transform"] {
+            let (tx, ty, tsx, tsy, trot) = parseTransform(transform)
+            ox += tx * sx
+            oy += ty * sy
+            sx *= tsx
+            sy *= tsy
+            rot += trot
         }
-        return (VectorPoint(x: ox, y: oy), VectorPoint(x: sx, y: sy))
+        return (VectorPoint(x: ox, y: oy), VectorPoint(x: sx, y: sy), rot, g.clipRect)
+    }
+
+    private func applyGroupStyleAttributes(_ attrs: [String: String], to ctx: inout GroupContext) {
+        if let s = attrs["stroke"] { ctx.strokeHex = normalizeColor(s) }
+        if let f = attrs["fill"] {
+            ctx.hasExplicitFill = true
+            ctx.fillHex = normalizeColor(f)
+        }
+        if let sw = parseDimension(attrs["stroke-width"]) { ctx.strokeWidth = sw }
+        if let opStr = attrs["opacity"], let op = Double(opStr) {
+            ctx.opacity *= min(1.0, max(0.0, op))
+        }
+    }
+
+    private func computeViewBoxTransform(
+        viewport: VectorRect,
+        viewBox: (minX: Double, minY: Double, width: Double, height: Double),
+        preserveAspectRatio: String?
+    ) -> (offsetX: Double, offsetY: Double, scaleX: Double, scaleY: Double) {
+        let vbW = max(1e-6, viewBox.width)
+        let vbH = max(1e-6, viewBox.height)
+        let par = (preserveAspectRatio ?? "xMidYMid meet").lowercased()
+        let rawSX = viewport.width / vbW
+        let rawSY = viewport.height / vbH
+
+        if par.contains("none") {
+            return (
+                offsetX: viewport.x - viewBox.minX * rawSX,
+                offsetY: viewport.y - viewBox.minY * rawSY,
+                scaleX: rawSX,
+                scaleY: rawSY
+            )
+        }
+
+        let isSlice = par.contains("slice")
+        let s = isSlice ? max(rawSX, rawSY) : min(rawSX, rawSY)
+        let mappedW = vbW * s
+        let mappedH = vbH * s
+
+        let alignX: Double
+        if par.contains("xmin") {
+            alignX = 0
+        } else if par.contains("xmax") {
+            alignX = viewport.width - mappedW
+        } else {
+            alignX = (viewport.width - mappedW) * 0.5
+        }
+
+        let alignY: Double
+        if par.contains("ymin") {
+            alignY = 0
+        } else if par.contains("ymax") {
+            alignY = viewport.height - mappedH
+        } else {
+            alignY = (viewport.height - mappedH) * 0.5
+        }
+
+        return (
+            offsetX: viewport.x + alignX - viewBox.minX * s,
+            offsetY: viewport.y + alignY - viewBox.minY * s,
+            scaleX: s,
+            scaleY: s
+        )
     }
 
     func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?, qualifiedName qName: String?, attributes attributeDict: [String: String] = [:]) {
@@ -520,50 +615,119 @@ private final class SVGXMLParserDelegate: NSObject, XMLParserDelegate {
 
         switch name {
         case "svg":
+            var parsedViewBox: (minX: Double, minY: Double, width: Double, height: Double)? = nil
             if let vb = attrs["viewBox"] ?? attrs["viewbox"] {
                 let nums = vb.split { $0 == " " || $0 == "," }.compactMap { Double($0) }
-                if nums.count == 4 {
-                    svgWidth = max(64, nums[2])
-                    svgHeight = max(64, nums[3])
+                if nums.count == 4, nums[2] > 0, nums[3] > 0 {
+                    parsedViewBox = (nums[0], nums[1], nums[2], nums[3])
                 }
             }
-            if let w = parseDimension(attrs["width"]) { svgWidth = max(64, w) }
-            if let h = parseDimension(attrs["height"]) { svgHeight = max(64, h) }
-            currentPage.width = svgWidth
-            currentPage.height = svgHeight
+
+            if svgDepth == 0 {
+                let explicitW = parseDimension(attrs["width"])
+                let explicitH = parseDimension(attrs["height"])
+                if let vb = parsedViewBox {
+                    svgWidth = max(64, explicitW ?? vb.width)
+                    svgHeight = max(64, explicitH ?? vb.height)
+                } else {
+                    if let w = explicitW { svgWidth = max(64, w) }
+                    if let h = explicitH { svgHeight = max(64, h) }
+                }
+                currentPage.width = svgWidth
+                currentPage.height = svgHeight
+
+                var ctx = groupStack.last ?? GroupContext()
+                if let vb = parsedViewBox {
+                    let vp = VectorRect(x: 0, y: 0, width: svgWidth, height: svgHeight)
+                    let (ox, oy, sx, sy) = computeViewBoxTransform(
+                        viewport: vp,
+                        viewBox: vb,
+                        preserveAspectRatio: attrs["preserveAspectRatio"] ?? attrs["preserveaspectratio"]
+                    )
+                    ctx.offsetX = ox
+                    ctx.offsetY = oy
+                    ctx.scaleX = sx
+                    ctx.scaleY = sy
+                }
+                applyGroupStyleAttributes(attrs, to: &ctx)
+                groupStack.append(ctx)
+            } else {
+                var ctx = groupStack.last ?? GroupContext()
+                ctx.isPageGroup = false
+                let parentOffX = ctx.offsetX
+                let parentOffY = ctx.offsetY
+                let parentScX = ctx.scaleX
+                let parentScY = ctx.scaleY
+
+                let rawX = parseDimension(attrs["x"]) ?? 0
+                let rawY = parseDimension(attrs["y"]) ?? 0
+                let rawW = parseDimension(attrs["width"]) ?? (svgWidth / max(1e-6, parentScX))
+                let rawH = parseDimension(attrs["height"]) ?? (svgHeight / max(1e-6, parentScY))
+                let pageViewport = VectorRect(
+                    x: rawX * parentScX + parentOffX,
+                    y: rawY * parentScY + parentOffY,
+                    width: max(1.0, rawW * parentScX),
+                    height: max(1.0, rawH * parentScY)
+                )
+                if attrs["overflow"]?.lowercased() != "visible" {
+                    if let existingClip = ctx.clipRect {
+                        ctx.clipRect = existingClip.intersecting(pageViewport) ?? pageViewport
+                    } else {
+                        ctx.clipRect = pageViewport
+                    }
+                }
+                if let vb = parsedViewBox {
+                    let (ox, oy, sx, sy) = computeViewBoxTransform(
+                        viewport: pageViewport,
+                        viewBox: vb,
+                        preserveAspectRatio: attrs["preserveAspectRatio"] ?? attrs["preserveaspectratio"]
+                    )
+                    ctx.offsetX = ox
+                    ctx.offsetY = oy
+                    ctx.scaleX = sx
+                    ctx.scaleY = sy
+                } else {
+                    ctx.offsetX = pageViewport.x
+                    ctx.offsetY = pageViewport.y
+                }
+                applyGroupStyleAttributes(attrs, to: &ctx)
+                groupStack.append(ctx)
+            }
+            svgDepth += 1
 
         case "g":
             var ctx = groupStack.last ?? GroupContext()
             ctx.isPageGroup = false
-            if let transform = attrs["transform"] {
-                let (tx, ty, sx, sy) = parseTransform(transform)
-                ctx.translateX = tx
-                ctx.translateY = ty
-                ctx.scaleX = sx
-                ctx.scaleY = sy
-            } else {
-                ctx.translateX = 0
-                ctx.translateY = 0
-                ctx.scaleX = 1
-                ctx.scaleY = 1
-            }
-            if let s = attrs["stroke"] { ctx.strokeHex = normalizeColor(s) }
-            if let f = attrs["fill"] { ctx.fillHex = normalizeColor(f) }
-            if let sw = parseDimension(attrs["stroke-width"]) { ctx.strokeWidth = sw }
-
             if let pageTitle = attrs["data-page-title"] {
                 ctx.isPageGroup = true
+                ctx.offsetX = 0
+                ctx.offsetY = 0
+                ctx.scaleX = 1
+                ctx.scaleY = 1
+                ctx.rotationDegrees = 0
+                ctx.clipRect = nil
                 let pw = parseDimension(attrs["data-page-width"]) ?? svgWidth
                 let ph = parseDimension(attrs["data-page-height"]) ?? svgHeight
                 currentPage = VectorPage(title: pageTitle, width: pw, height: ph)
-            } else if attrs["data-role"] == "signature" {
-                ctx.isSignatureGroup = true
-                ctx.signerName = attrs["data-signer"] ?? ""
-                signatureStrokesAccumulator.removeAll()
-            } else if attrs["data-role"] == "stamp" {
-                ctx.isStampGroup = true
-                ctx.stampKind = attrs["data-kind"].flatMap(VectorStampKind.init(rawValue:)) ?? .approved
+            } else {
+                if let transform = attrs["transform"] {
+                    let (tx, ty, sx, sy, rot) = parseTransform(transform)
+                    ctx.offsetX += tx * ctx.scaleX
+                    ctx.offsetY += ty * ctx.scaleY
+                    ctx.scaleX *= sx
+                    ctx.scaleY *= sy
+                    ctx.rotationDegrees += rot
+                }
+                if attrs["data-role"] == "signature" {
+                    ctx.isSignatureGroup = true
+                    ctx.signerName = attrs["data-signer"] ?? ""
+                    signatureStrokesAccumulator.removeAll()
+                } else if attrs["data-role"] == "stamp" {
+                    ctx.isStampGroup = true
+                    ctx.stampKind = attrs["data-kind"].flatMap(VectorStampKind.init(rawValue:)) ?? .approved
+                }
             }
+            applyGroupStyleAttributes(attrs, to: &ctx)
             groupStack.append(ctx)
 
         case "rect":
@@ -574,31 +738,41 @@ private final class SVGXMLParserDelegate: NSObject, XMLParserDelegate {
                 return
             }
             if groupStack.last?.isStampGroup == true { return }
-            let (off, sc) = currentTransform
+            let (off, sc, rot, clip) = effectiveTransform(for: attrs)
             let x = (parseDimension(attrs["x"]) ?? 0) * sc.x + off.x
             let y = (parseDimension(attrs["y"]) ?? 0) * sc.y + off.y
             let w = (parseDimension(attrs["width"]) ?? 60) * sc.x
             let h = (parseDimension(attrs["height"]) ?? 40) * sc.y
-            let rx = parseDimension(attrs["rx"]) ?? parseDimension(attrs["ry"]) ?? 0
-            if x <= 0.5 && y <= 0.5 && abs(w - currentPage.width) < 2 && abs(h - currentPage.height) < 2,
+            let rx = (parseDimension(attrs["rx"]) ?? parseDimension(attrs["ry"]) ?? 0) * sc.x
+            if clip == nil,
+               x <= 0.5 && y <= 0.5 && abs(w - currentPage.width) < 2 && abs(h - currentPage.height) < 2,
                currentPage.elements.isEmpty, let fill = normalizeColor(attrs["fill"]) {
                 currentPage.backgroundColorHex = fill
                 return
             }
-            let style = buildStyle(from: attrs, defaultFill: "#111317")
+            let style = buildStyle(from: attrs, scale: sc, defaultFill: "#111317")
             let shapeType: VectorShapeType = rx > 0.5 ? .roundedRectangle : .rectangle
+            var rectFrame = VectorRect(x: x, y: y, width: w, height: h)
+            var rectClip = clip
+            if let clip, rx <= 0.5, style.strokeColorHex == nil, abs(rot) < 0.01,
+               let clippedFrame = rectFrame.intersecting(clip) {
+                rectFrame = clippedFrame
+                rectClip = nil
+            }
             let el = VectorElement(
                 name: rx > 0.5 ? L("Cadre arrondi", "Rounded Box") : L("Rectangle", "Rectangle"),
                 kind: .shape(ShapePayload(shapeType: shapeType, cornerRadius: rx)),
-                frame: VectorRect(x: x, y: y, width: w, height: h),
+                frame: rectFrame,
+                clipRect: rectClip,
+                rotationDegrees: rot,
                 style: style
             )
             currentPage.elements.append(el)
 
         case "circle", "ellipse":
-            let (off, sc) = currentTransform
-            let cx = (parseDimension(attrs["cx"]) ?? 50) * sc.x + off.x
-            let cy = (parseDimension(attrs["cy"]) ?? 50) * sc.y + off.y
+            let (off, sc, rot, clip) = effectiveTransform(for: attrs)
+            let cx = (parseDimension(attrs["cx"]) ?? 0) * sc.x + off.x
+            let cy = (parseDimension(attrs["cy"]) ?? 0) * sc.y + off.y
             let rx: Double
             let ry: Double
             if name == "circle" {
@@ -609,36 +783,40 @@ private final class SVGXMLParserDelegate: NSObject, XMLParserDelegate {
                 rx = (parseDimension(attrs["rx"]) ?? 30) * sc.x
                 ry = (parseDimension(attrs["ry"]) ?? 20) * sc.y
             }
-            let style = buildStyle(from: attrs, defaultFill: nil)
+            let style = buildStyle(from: attrs, scale: sc, defaultFill: nil)
             let el = VectorElement(
                 name: L("Ellipse", "Ellipse"),
                 kind: .shape(ShapePayload(shapeType: .ellipse)),
                 frame: VectorRect(x: cx - rx, y: cy - ry, width: rx * 2, height: ry * 2),
+                clipRect: clip,
+                rotationDegrees: rot,
                 style: style
             )
             currentPage.elements.append(el)
 
         case "line":
-            let (off, sc) = currentTransform
+            let (off, sc, rot, clip) = effectiveTransform(for: attrs)
             let x1 = (parseDimension(attrs["x1"]) ?? 0) * sc.x + off.x
             let y1 = (parseDimension(attrs["y1"]) ?? 0) * sc.y + off.y
             let x2 = (parseDimension(attrs["x2"]) ?? 80) * sc.x + off.x
             let y2 = (parseDimension(attrs["y2"]) ?? 80) * sc.y + off.y
             let pts = [VectorPoint(x: x1, y: y1), VectorPoint(x: x2, y: y2)]
             let (bounds, norm) = StrokeSmoother.normalizeStrokes([pts])
-            var style = buildStyle(from: attrs, defaultFill: nil)
+            var style = buildStyle(from: attrs, scale: sc, defaultFill: nil)
             if style.strokeColorHex == nil { style.strokeColorHex = "#111317" }
             let el = VectorElement(
                 name: L("Ligne", "Line"),
                 kind: .path(PathPayload(subpaths: [VectorSubpath(points: norm[0], isClosed: false)])),
                 frame: bounds,
+                clipRect: clip,
+                rotationDegrees: rot,
                 style: style
             )
             currentPage.elements.append(el)
 
         case "polyline", "polygon":
             guard let rawPts = attrs["points"] else { return }
-            let (off, sc) = currentTransform
+            let (off, sc, rot, clip) = effectiveTransform(for: attrs)
             let coords = rawPts.split { $0 == " " || $0 == "," || $0.isNewline }.compactMap { Double($0) }
             var pts: [VectorPoint] = []
             var i = 0
@@ -648,18 +826,20 @@ private final class SVGXMLParserDelegate: NSObject, XMLParserDelegate {
             }
             guard pts.count >= 2 else { return }
             let (bounds, norm) = StrokeSmoother.normalizeStrokes([pts])
-            let style = buildStyle(from: attrs, defaultFill: name == "polygon" ? "#111317" : nil)
+            let style = buildStyle(from: attrs, scale: sc, defaultFill: name == "polygon" ? "#111317" : nil)
             let el = VectorElement(
                 name: name == "polygon" ? L("Polygone", "Polygon") : L("Polyligne", "Polyline"),
                 kind: .path(PathPayload(subpaths: [VectorSubpath(points: norm[0], isClosed: name == "polygon")])),
                 frame: bounds,
+                clipRect: clip,
+                rotationDegrees: rot,
                 style: style
             )
             currentPage.elements.append(el)
 
         case "path":
             guard let d = attrs["d"], !d.isEmpty else { return }
-            let (off, sc) = currentTransform
+            let (off, sc, rot, clip) = effectiveTransform(for: attrs)
             let rawSubpaths = SVGCodec.parsePathData(d, offset: off, scale: sc)
             let allPoints = rawSubpaths.flatMap(\.points)
             guard !allPoints.isEmpty else { return }
@@ -681,7 +861,7 @@ private final class SVGXMLParserDelegate: NSObject, XMLParserDelegate {
                     isClosed: sub.isClosed
                 )
             }
-            var style = buildStyle(from: attrs, defaultFill: nil)
+            var style = buildStyle(from: attrs, scale: sc, defaultFill: nil)
             if style.strokeColorHex == nil && style.fillColorHex == nil {
                 style.strokeColorHex = "#111317"
             }
@@ -689,6 +869,8 @@ private final class SVGXMLParserDelegate: NSObject, XMLParserDelegate {
                 name: attrs["id"] ?? L("Tracé vectoriel", "Vector Path"),
                 kind: .path(PathPayload(subpaths: normSubpaths)),
                 frame: bounds,
+                clipRect: clip,
+                rotationDegrees: rot,
                 style: style
             )
             currentPage.elements.append(el)
@@ -719,51 +901,79 @@ private final class SVGXMLParserDelegate: NSObject, XMLParserDelegate {
     func parser(_ parser: XMLParser, didEndElement elementName: String, namespaceURI: String?, qualifiedName qName: String?) {
         let name = elementName.lowercased()
         if name == "text", let attrs = activeTextAttributes {
-            let trimmed = activeTextAccumulator.trimmingCharacters(in: .whitespacesAndNewlines)
+            var trimmed = activeTextAccumulator.trimmingCharacters(in: .whitespacesAndNewlines)
             activeTextAttributes = nil
             activeTextAccumulator = ""
             guard !trimmed.isEmpty else { return }
-            let (off, sc) = currentTransform
-            let fontSize = (parseDimension(attrs["font-size"]) ?? 14.0) * sc.y
-            let rawX = (parseDimension(attrs["x"]) ?? 24.0) * sc.x + off.x
-            let rawY = (parseDimension(attrs["y"]) ?? (24.0 + fontSize)) * sc.y + off.y
-            let isBold = (attrs["font-weight"]?.lowercased().contains("bold") == true) || (attrs["font-weight"] == "700")
+            if attrs["text-transform"]?.lowercased() == "uppercase" {
+                trimmed = trimmed.uppercased()
+            }
+            let (off, sc, rot, clip) = effectiveTransform(for: attrs)
+            let fontSize = max(1.0, (parseDimension(attrs["font-size"]) ?? 14.0) * sc.y)
+            let rawX = (parseDimension(attrs["x"]) ?? 0.0) * sc.x + off.x
+            let rawY = (parseDimension(attrs["y"]) ?? 0.0) * sc.y + off.y
+            let fwLower = attrs["font-weight"]?.lowercased() ?? ""
+            let fwNum = Int(fwLower) ?? 400
+            let isBold = fwLower.contains("bold") || fwLower.contains("black") || fwLower.contains("heavy") || fwNum >= 600
             let isItalic = (attrs["font-style"]?.lowercased().contains("italic") == true)
-            let fontFamily = attrs["font-family"]?.replacingOccurrences(of: "'", with: "").replacingOccurrences(of: "\"", with: "") ?? "Helvetica Neue"
-            let fillHex = normalizeColor(attrs["fill"]) ?? groupStack.last?.fillHex ?? "#111317"
-            let lines = trimmed.split(separator: "\n", omittingEmptySubsequences: false)
-            let maxChars = max(4, lines.map(\.count).max() ?? 8)
-            let estWidth = max(48.0, Double(maxChars) * fontSize * 0.56)
-            let estHeight = max(fontSize * 1.25, Double(lines.count) * fontSize * 1.32)
+            let fontFamily = resolveSVGFontFamily(attrs["font-family"])
+            let letterSpacing = (parseDimension(attrs["letter-spacing"]) ?? 0.0) * sc.x
+            let g = groupStack.last ?? GroupContext()
+            let fillHex = normalizeColor(attrs["fill"]) ?? g.fillHex ?? "#111317"
+            let opacity = (Double(attrs["opacity"] ?? "") ?? 1.0) * g.opacity
 
             let alignment: TextAlignmentMode
-            let boxX: Double
             switch attrs["text-anchor"]?.lowercased() {
             case "middle":
                 alignment = .center
-                boxX = rawX - estWidth * 0.5
             case "end":
                 alignment = .right
-                boxX = rawX - estWidth
             default:
                 alignment = .left
+            }
+
+            var payload = TextPayload(
+                text: trimmed,
+                fontFamily: fontFamily,
+                fontSize: fontSize,
+                isBold: isBold,
+                isItalic: isItalic,
+                alignment: alignment,
+                letterSpacing: letterSpacing
+            )
+            let ctFont = PDFCodec.resolveCTFont(for: payload, size: CGFloat(fontSize))
+            let baselineOff = Double(CTFontGetCapHeight(ctFont))
+            payload.baselineOffset = baselineOff
+
+            let lines = trimmed.split(separator: "\n", omittingEmptySubsequences: false)
+            let measuredW = PDFCodec.measureTextWidth(for: payload)
+            let estWidth = max(4.0, measuredW + 2.0)
+            let estHeight = max(fontSize * 1.15, Double(lines.count) * fontSize * 1.25)
+
+            let boxX: Double
+            switch alignment {
+            case .center:
+                boxX = rawX - estWidth * 0.5
+            case .right:
+                boxX = rawX - estWidth
+            case .left:
                 boxX = rawX
             }
 
             let el = VectorElement(
                 name: String(trimmed.prefix(28)),
-                kind: .text(TextPayload(
-                    text: trimmed,
-                    fontFamily: fontFamily,
-                    fontSize: fontSize,
-                    isBold: isBold,
-                    isItalic: isItalic,
-                    alignment: alignment
-                )),
-                frame: VectorRect(x: boxX, y: max(0, rawY - fontSize), width: estWidth, height: estHeight),
-                style: VectorStyle(strokeColorHex: nil, fillColorHex: fillHex, strokeWidth: 0, opacity: 1.0)
+                kind: .text(payload),
+                frame: VectorRect(x: boxX, y: rawY - baselineOff, width: estWidth, height: estHeight),
+                clipRect: clip,
+                rotationDegrees: rot,
+                style: VectorStyle(strokeColorHex: nil, fillColorHex: fillHex, strokeWidth: 0, opacity: opacity)
             )
             currentPage.elements.append(el)
+        } else if name == "svg" {
+            svgDepth = max(0, svgDepth - 1)
+            if groupStack.count > 1 {
+                _ = groupStack.popLast()
+            }
         } else if name == "g" {
             guard let popped = groupStack.popLast() else { return }
             if popped.isPageGroup {
@@ -802,14 +1012,16 @@ private final class SVGXMLParserDelegate: NSObject, XMLParserDelegate {
         return out
     }
 
-    private func buildStyle(from attrs: [String: String], defaultFill: String?) -> VectorStyle {
+    private func buildStyle(from attrs: [String: String], scale: VectorPoint, defaultFill: String?) -> VectorStyle {
         let g = groupStack.last ?? GroupContext()
         let rawFill = attrs["fill"]
         let fillHex: String?
         if let rf = rawFill {
             fillHex = normalizeColor(rf)
+        } else if g.hasExplicitFill {
+            fillHex = g.fillHex
         } else {
-            fillHex = g.fillHex ?? defaultFill
+            fillHex = defaultFill
         }
         let rawStroke = attrs["stroke"]
         let strokeHex: String?
@@ -818,10 +1030,42 @@ private final class SVGXMLParserDelegate: NSObject, XMLParserDelegate {
         } else {
             strokeHex = g.strokeHex
         }
-        let sw = parseDimension(attrs["stroke-width"]) ?? g.strokeWidth ?? (strokeHex != nil ? 1.6 : 0.0)
-        let op = Double(attrs["opacity"] ?? "") ?? g.opacity
+        let rawSW = parseDimension(attrs["stroke-width"]) ?? g.strokeWidth ?? (strokeHex != nil ? 1.6 : 0.0)
+        let avgScale = (abs(scale.x) + abs(scale.y)) * 0.5
+        let sw = rawSW * avgScale
+        let elemOp = Double(attrs["opacity"] ?? "") ?? 1.0
+        let fillOp = Double(attrs["fill-opacity"] ?? "") ?? 1.0
+        let strokeOp = Double(attrs["stroke-opacity"] ?? "") ?? 1.0
+        let op = elemOp * min(fillOp, strokeOp) * g.opacity
         let dashed = attrs["stroke-dasharray"] != nil && attrs["stroke-dasharray"] != "none"
         return VectorStyle(strokeColorHex: strokeHex, fillColorHex: fillHex, strokeWidth: sw, opacity: op, dashed: dashed)
+    }
+
+    private func resolveSVGFontFamily(_ raw: String?) -> String {
+        guard let raw, !raw.isEmpty else { return "Helvetica Neue" }
+        let candidates = raw.split(separator: ",").map {
+            $0.replacingOccurrences(of: "'", with: "")
+              .replacingOccurrences(of: "\"", with: "")
+              .trimmingCharacters(in: .whitespacesAndNewlines)
+        }.filter { !$0.isEmpty }
+        for cand in candidates {
+            let lower = cand.lowercased()
+            if lower == "sans-serif" || lower == "system-ui" {
+                return "Helvetica Neue"
+            }
+            if lower == "serif" {
+                return "Georgia"
+            }
+            if lower == "monospace" {
+                return "Menlo"
+            }
+            let ct = CTFontCreateWithName(cand as CFString, 12.0, nil)
+            let actualFam = (CTFontCopyFamilyName(ct) as String).lowercased()
+            if actualFam == lower {
+                return cand
+            }
+        }
+        return "Helvetica Neue"
     }
 
     private func normalizeColor(_ raw: String?) -> String? {
@@ -831,20 +1075,31 @@ private final class SVGXMLParserDelegate: NSObject, XMLParserDelegate {
 
     private func parseDimension(_ raw: String?) -> Double? {
         guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else { return nil }
+        if raw.hasSuffix("%") { return nil }
         let cleaned = raw
             .replacingOccurrences(of: "px", with: "")
             .replacingOccurrences(of: "pt", with: "")
         if cleaned.hasSuffix("mm"), let v = Double(cleaned.dropLast(2)) {
             return v * 72.0 / 25.4
         }
+        if cleaned.hasSuffix("cm"), let v = Double(cleaned.dropLast(2)) {
+            return v * 72.0 / 2.54
+        }
+        if cleaned.hasSuffix("in"), let v = Double(cleaned.dropLast(2)) {
+            return v * 72.0
+        }
+        if cleaned.hasSuffix("pc"), let v = Double(cleaned.dropLast(2)) {
+            return v * 12.0
+        }
         return Double(cleaned)
     }
 
-    private func parseTransform(_ raw: String) -> (Double, Double, Double, Double) {
+    private func parseTransform(_ raw: String) -> (Double, Double, Double, Double, Double) {
         var tx = 0.0
         var ty = 0.0
         var sx = 1.0
         var sy = 1.0
+        var rot = 0.0
         if let range = raw.range(of: "translate("),
            let end = raw[range.upperBound...].firstIndex(of: ")") {
             let inner = raw[range.upperBound..<end]
@@ -863,6 +1118,14 @@ private final class SVGXMLParserDelegate: NSObject, XMLParserDelegate {
                 sy = nums.count > 1 ? nums[1] : first
             }
         }
-        return (tx, ty, sx, sy)
+        if let range = raw.range(of: "rotate("),
+           let end = raw[range.upperBound...].firstIndex(of: ")") {
+            let inner = raw[range.upperBound..<end]
+            let nums = inner.split { $0 == "," || $0 == " " }.compactMap { Double($0) }
+            if let first = nums.first {
+                rot = first
+            }
+        }
+        return (tx, ty, sx, sy, rot)
     }
 }

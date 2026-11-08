@@ -5,15 +5,25 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 CONFIG="${1:-release}"
-VERSION="0.2.3"
+VERSION="0.2.4"
 BUILD="$(git rev-list --count HEAD 2>/dev/null || echo 1)"
 
 if [ ! -f Resources/AppIcon.icns ]; then
     swift Scripts/make-icon.swift
 fi
 
-swift build -c "$CONFIG"
-BIN="$(swift build -c "$CONFIG" --show-bin-path)"
+ARCH="${ARCH:-$([ "$CONFIG" = release ] && echo universal || echo native)}"
+case "$ARCH" in
+    universal) ARCH_FLAGS="--arch arm64 --arch x86_64" ;;
+    x86_64|intel) ARCH_FLAGS="--arch x86_64" ;;
+    arm64) ARCH_FLAGS="--arch arm64" ;;
+    *) ARCH_FLAGS="" ;;
+esac
+
+# shellcheck disable=SC2086
+swift build -c "$CONFIG" $ARCH_FLAGS
+# shellcheck disable=SC2086
+BIN="$(swift build -c "$CONFIG" $ARCH_FLAGS --show-bin-path)"
 APP="${APP:-build/SimpleVector.app}"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"

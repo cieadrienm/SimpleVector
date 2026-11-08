@@ -504,7 +504,7 @@ public enum PDFCodec {
     /// Resolves the exact `CTFont` for a `TextPayload` at a requested point size, preserving PDF PostScript names,
     /// embedded PDF fonts, completed Google Fonts, font families, and bold/italic symbolic traits.
     public static func resolveCTFont(for payload: TextPayload, size: CGFloat) -> CTFont {
-        let clampedSize = max(4.0, size)
+        let clampedSize = max(1.0, size)
         var requestedTraits: CTFontSymbolicTraits = []
         if payload.isBold { requestedTraits.insert(.boldTrait) }
         if payload.isItalic { requestedTraits.insert(.italicTrait) }
@@ -732,6 +732,9 @@ public enum PDFCodec {
         ctx.saveGState()
         defer { ctx.restoreGState() }
 
+        if let clip = el.clipRect {
+            ctx.clip(to: clip.cgRect)
+        }
         ctx.setAlpha(CGFloat(el.style.opacity))
         let f = el.frame
         if abs(el.rotationDegrees) > 0.01 {
@@ -740,13 +743,15 @@ public enum PDFCodec {
             ctx.translateBy(x: -CGFloat(f.midX), y: -CGFloat(f.midY))
         }
 
-        if el.style.dashed {
-            ctx.setLineDash(phase: 0, lengths: [6, 4])
-        }
-
         let fillColor = RGBAColor(hex: el.style.fillColorHex)
         let strokeColor = RGBAColor(hex: el.style.strokeColorHex)
-        let lineWidth = CGFloat(max(0.5, el.style.strokeWidth))
+        let lineWidth = CGFloat(max(0.15, el.style.strokeWidth))
+
+        if el.style.dashed {
+            let d0 = max(1.8, lineWidth * 2.5)
+            let d1 = max(1.5, lineWidth * 2.0)
+            ctx.setLineDash(phase: 0, lengths: [d0, d1])
+        }
 
         switch el.kind {
         case .shape(let s):
@@ -1175,9 +1180,9 @@ public enum PDFCodec {
         case .left:
             drawX = origin.x
         case .center:
-            drawX = origin.x + CGFloat(max(0, (boxWidth - lineWidth) * 0.5))
+            drawX = origin.x + CGFloat((boxWidth - lineWidth) * 0.5)
         case .right:
-            drawX = origin.x + CGFloat(max(0, boxWidth - lineWidth))
+            drawX = origin.x + CGFloat(boxWidth - lineWidth)
         }
 
         ctx.saveGState()

@@ -457,7 +457,8 @@ struct CanvasViewportView: View {
 
         // Selection bounding boxes, resize handles & rotation handle outside clip
         for el in page.elements where model.controller.selection.contains(el.id) && el.visible {
-            let selRect = geom.pageRectToPane(el.frame)
+            let visibleFrame = el.clipRect.flatMap { el.frame.intersecting($0) } ?? el.frame
+            let selRect = geom.pageRectToPane(visibleFrame)
             ctx.drawLayer { selLayer in
                 if abs(el.rotationDegrees) > 0.01 {
                     selLayer.translateBy(x: selRect.midX, y: selRect.midY)
@@ -509,6 +510,9 @@ struct CanvasViewportView: View {
     ) {
         let paneRect = geom.pageRectToPane(el.frame)
         parentLayer.drawLayer { layer in
+            if let clip = el.clipRect {
+                layer.clip(to: Path(geom.pageRectToPane(clip)))
+            }
             if abs(el.rotationDegrees) > 0.01 {
                 layer.translateBy(x: paneRect.midX, y: paneRect.midY)
                 layer.rotate(by: .degrees(el.rotationDegrees))
@@ -516,8 +520,8 @@ struct CanvasViewportView: View {
             }
             let fillRGB = RGBAColor(hex: el.style.fillColorHex)
             let strokeRGB = RGBAColor(hex: el.style.strokeColorHex)
-            let lineW = max(0.8, CGFloat(el.style.strokeWidth) * geom.scale)
-            let dash: [CGFloat] = el.style.dashed ? [6 * geom.zoomScale, 4 * geom.zoomScale] : []
+            let lineW = max(0.25, CGFloat(el.style.strokeWidth) * geom.scale)
+            let dash: [CGFloat] = el.style.dashed ? [max(1.8, lineW * 2.5), max(1.5, lineW * 2.0)] : []
 
             if let path = cached?.path {
                 let transformed = path.applying(tx)
@@ -570,7 +574,7 @@ struct CanvasViewportView: View {
 
             case .text(let t):
                 let tc = fillRGB ?? strokeRGB ?? RGBAColor(r: 0.07, g: 0.07, b: 0.09)
-                let fontSize = max(4.5, CGFloat(t.fontSize) * geom.scale)
+                let fontSize = max(1.0, CGFloat(t.fontSize) * geom.scale)
                 let ctFont = PDFCodec.resolveCTFont(for: t, size: fontSize)
                 let unscaledFont = PDFCodec.resolveCTFont(for: t, size: CGFloat(t.fontSize))
                 let firstBaselineOffset = t.baselineOffset ?? Double(CTFontGetCapHeight(unscaledFont))
@@ -990,6 +994,9 @@ struct CanvasViewportView: View {
             guard el.visible else { return false }
             if textOnly {
                 guard case .text = el.kind else { return false }
+            }
+            if let clip = el.clipRect, !clip.contains(pagePt, margin: 2.0) {
+                return false
             }
             return el.frame.contains(pagePt, margin: 3.0)
         }
